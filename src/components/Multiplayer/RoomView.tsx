@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { GameRoom } from '../../types';
@@ -9,6 +9,11 @@ import {
   leaveGameRoom,
   executeDiceRollAndMove,
   resetRoomToPlayAgain,
+  handleTurnTimeout,
+  updatePlayerPresence,
+  markPlayerDisconnected,
+  reconnectPlayerToRoom,
+  handleReconnectionTimeout,
 } from '../../services/roomService';
 import { GameBoard } from '../SnakesAndLadders/GameBoard';
 import { DiceRoller } from '../SnakesAndLadders/DiceRoller';
@@ -26,6 +31,8 @@ import {
   Clock,
   Sparkles,
   Info,
+  WifiOff,
+  AlertTriangle,
 } from 'lucide-react';
 
 interface RoomViewProps {
@@ -41,6 +48,8 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
   const [copiedLink, setCopiedLink] = useState(false);
   const [movingPlayerId, setMovingPlayerId] = useState<string | null>(null);
   const [actionInProgress, setActionInProgress] = useState(false);
+  const [gameErrorNotice, setGameErrorNotice] = useState<string | null>(null);
+  const [reconnectCountdown, setReconnectCountdown] = useState<number>(60);
 
   // Rewards state for end-game modal
   const [rewardOutcome, setRewardOutcome] = useState<{
@@ -57,7 +66,8 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
       roomRef,
       (snapshot) => {
         if (snapshot.exists()) {
-          setRoom(snapshot.data() as GameRoom);
+          const roomData = snapshot.data() as GameRoom;
+          setRoom(roomData);
         } else {
           // Room deleted or closed
           onExitRoom();
@@ -72,6 +82,54 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
 
     return () => unsubscribe();
   }, [roomId, onExitRoom]);
+
+  // Player Presence & Heartbeat (every 6 seconds) + Reconnection check
+  useEffect(() => {
+    if (!currentUser || !roomId) return;
+
+    // Initial reconnect check
+    reconnectPlayerToRoom(roomId, currentUser.uid);
+
+    const heartbeatInterval = setInterval(() => {
+      if (navigator.onLine) {
+        updatePlayerPresence(roomId, currentUser.uid);
+      }
+    }, 6000);
+
+    const handleOnline = () => {
+      reconnectPlayerToRoom(roomId, currentUser.uid);
+    };
+
+    const handleOffline = () => {
+      markPlayerDisconnected(roomId, currentUser.uid);
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      clearInterval(heartbeatInterval);
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [roomId, currentUser]);
+
+  // Monitor Reconnection Deadline (60 Seconds)
+  useEffect(() => {
+    if (!room?.reconnectionDeadline) return;
+
+    const interval = setInterval(() => {
+      const now = Date.now();
+      const diffSecs = Math.max(0, Math.ceil((room.reconnectionDeadline! - now) / 1000));
+      setReconnectCountdown(diffSecs);
+
+      if (diffSecs <= 0) {
+        handleReconnectionTimeout(roomId);
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [room?.reconnectionDeadline, roomId]);
 
   // When game finishes, award points and XP to the players
   useEffect(() => {
@@ -90,8 +148,8 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
     return (
       <div className="min-h-[500px] flex flex-col items-center justify-center p-6 text-center">
         <div className="w-12 h-12 border-4 border-amber-500 border-t-transparent rounded-full animate-spin mb-4" />
-        <div className="text-white font-bold text-lg">အခန်းချိတ်ဆက်နေပါသည်...</div>
-        <div className="text-slate-400 text-sm mt-1">ကျေးဇူးပြု၍ ခဏစောင့်ဆိုင်းပေးပါ</div>
+        <div className="text-slate-800 font-bold text-lg">အခန်းချိတ်ဆက်နေပါသည်...</div>
+        <div className="text-slate-500 text-sm mt-1">ကျေးဇူးပြု၍ ခဏစောင့်ဆိုင်းပေးပါ</div>
       </div>
     );
   }
@@ -140,28 +198,37 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
     onExitRoom();
   };
 
+  // Roll Dice & Atomic Execution
   const handleRollDice = async (diceRoll: number) => {
-    if (!currentUser || !isMyTurn || actionInProgress) return;
+    if (!currentUser || !isMyTurn || actionInProgress || room.status !== 'playing') return;
     setActionInProgress(true);
     setMovingPlayerId(currentUser.uid);
+    setGameErrorNotice(null);
 
     try {
       const outcome = await executeDiceRollAndMove(roomId, currentUser.uid, diceRoll);
-      // Play sound according to outcome
-      if (outcome.eventSummary.includes('လှေကား')) {
-        sounds.playLadder();
-      } else if (outcome.eventSummary.includes('မြွေ')) {
-        sounds.playSnake();
-      } else {
-        sounds.playStep();
-      }
-    } catch (error) {
-      console.error('Move error:', error);
-    } finally {
+      // Wait for token walk animation to complete before re-enabling
+      const animationTime = Math.max(1000, (outcome.movePath?.length || 1) * 250);
       setTimeout(() => {
         setMovingPlayerId(null);
         setActionInProgress(false);
-      }, 800);
+      }, animationTime);
+    } catch (error: any) {
+      console.error('Move error:', error);
+      setGameErrorNotice(error?.message || 'အံစာတုံးခေါက်ရာတွင် အဆင်မပြေဖြစ်သွားပါသည်။ ပြန်လည်ကြိုးစားပေးပါ။');
+      setMovingPlayerId(null);
+      setActionInProgress(false);
+      setTimeout(() => setGameErrorNotice(null), 3500);
+    }
+  };
+
+  const handleTurnTimeoutTrigger = async () => {
+    if (room.status === 'playing') {
+      try {
+        await handleTurnTimeout(roomId);
+      } catch (err) {
+        console.warn('Timeout skip error:', err);
+      }
     }
   };
 
@@ -378,6 +445,30 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
 
   return (
     <div className="max-w-5xl mx-auto p-2 md:p-4 space-y-3 text-slate-800">
+      {/* Disconnection Grace Period Notice (60 Seconds) */}
+      {room.disconnectedPlayerId && (
+        <div className="p-3 bg-amber-100 border-2 border-amber-400 rounded-2xl flex items-center justify-between text-xs font-bold text-amber-950 animate-in fade-in shadow-xs">
+          <div className="flex items-center gap-2">
+            <WifiOff className="w-4 h-4 text-rose-600 shrink-0 animate-pulse" />
+            <span>
+              ကစားသမား <strong className="text-rose-700 font-black">{room.disconnectedPlayerName}</strong> ၏
+              အင်တာနက်လိုင်း ပြတ်တောက်နေပါသည်။ ပြန်လည်ချိတ်ဆက်ရန် စောင့်ဆိုင်းပေးပါ...
+            </span>
+          </div>
+          <span className="px-2.5 py-0.5 bg-rose-600 text-white rounded-full text-[11px] font-mono font-black shrink-0">
+            {reconnectCountdown}s ကျန်
+          </span>
+        </div>
+      )}
+
+      {/* Error notification banner */}
+      {gameErrorNotice && (
+        <div className="p-3 bg-rose-50 border border-rose-300 rounded-xl text-xs font-semibold text-rose-800 flex items-center gap-2 animate-in fade-in">
+          <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+          <span>{gameErrorNotice}</span>
+        </div>
+      )}
+
       {/* Top Match Bar */}
       <div className="bg-white border border-slate-200/90 rounded-2xl px-4 py-2.5 flex items-center justify-between gap-2 shadow-xs backdrop-blur-md">
         <div className="flex items-center gap-2">
@@ -392,13 +483,18 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
               key={p.uid}
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold border transition ${
                 idx === room.currentTurnIndex
-                  ? 'border-amber-400 bg-amber-100 text-amber-950 shadow-xs'
+                  ? 'border-amber-400 bg-amber-100 text-amber-950 shadow-xs ring-2 ring-amber-300/40'
                   : 'border-slate-200 bg-slate-50 text-slate-700'
               }`}
             >
               <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: p.color }} />
               <span className="truncate max-w-[70px]">{p.displayName}</span>
               <span className="text-amber-800 font-mono text-[11px]">#{p.position}</span>
+              {p.isConnected === false && (
+                <span title="Offline">
+                  <WifiOff className="w-3 h-3 text-rose-600" />
+                </span>
+              )}
             </div>
           ))}
         </div>
@@ -411,15 +507,18 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
         </button>
       </div>
 
-      {/* Main Board View */}
+      {/* Main Board View with Step Animation */}
       <GameBoard
         players={room.players}
         currentTurnIndex={room.currentTurnIndex}
         boardSkin={userProfile?.activeBoardSkin || 'board_classic'}
         movingPlayerId={movingPlayerId}
+        lastMovePath={room.lastMovePath}
+        lastMoveTimestamp={room.lastMoveTimestamp}
+        lastMovingPlayerUid={room.lastMovingPlayerUid}
       />
 
-      {/* Turn & Dice Action Controller */}
+      {/* Turn & Dice Action Controller with 30s Countdown */}
       <DiceRoller
         isMyTurn={isMyTurn}
         currentTurnPlayer={currentTurnPlayer}
@@ -428,6 +527,8 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
         onRollDice={handleRollDice}
         disabled={actionInProgress || room.status === 'finished'}
         diceSkin={userProfile?.activeDiceSkin || 'dice_classic'}
+        turnDeadline={room.turnDeadline}
+        onTimeout={handleTurnTimeoutTrigger}
       />
 
       {/* Victory Celebration Modal */}

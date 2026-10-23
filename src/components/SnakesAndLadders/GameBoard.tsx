@@ -1,18 +1,22 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState, useEffect, useRef } from 'react';
 import { RoomPlayer } from '../../types';
 import { GAME_CONFIG } from '../../config/gameRules';
-import { Crown, Star, Gem, ShieldAlert, Sparkles } from 'lucide-react';
+import { Crown, Star, Gem, ShieldAlert, Sparkles, WifiOff } from 'lucide-react';
+import { sounds } from '../../lib/sound';
 
 interface GameBoardProps {
   players: RoomPlayer[];
   currentTurnIndex: number;
   boardSkin?: string;
   movingPlayerId?: string | null;
+  lastMovePath?: number[];
+  lastMoveTimestamp?: number;
+  lastMovingPlayerUid?: string | null;
 }
 
 // Convert tile number (1-100) to percentage coordinates (0-100%)
 export function getTileCoordinates(tileNumber: number): { x: number; y: number } {
-  const safeTile = Math.max(1, Math.min(100, tileNumber));
+  const safeTile = Math.max(1, Math.min(100, Math.round(tileNumber || 1)));
   const zeroIndexed = safeTile - 1;
   const rowFromBottom = Math.floor(zeroIndexed / 10);
   const colInRow = zeroIndexed % 10;
@@ -30,7 +34,88 @@ export const GameBoard: React.FC<GameBoardProps> = ({
   currentTurnIndex,
   boardSkin = 'board_classic',
   movingPlayerId,
+  lastMovePath,
+  lastMoveTimestamp,
+  lastMovingPlayerUid,
 }) => {
+  // Local animated positions map: { [playerUid]: currentAnimatedTile }
+  const [animatedPositions, setAnimatedPositions] = useState<{ [uid: string]: number }>({});
+  const lastAnimatedTimestampRef = useRef<number>(0);
+
+  // Sync positions when players update or when starting
+  useEffect(() => {
+    setAnimatedPositions((prev) => {
+      const next: { [uid: string]: number } = { ...prev };
+      players.forEach((p) => {
+        if (next[p.uid] === undefined) {
+          next[p.uid] = p.position || 1;
+        }
+      });
+      return next;
+    });
+  }, [players]);
+
+  // Step-by-step Tile Walking Animation
+  useEffect(() => {
+    if (
+      lastMoveTimestamp &&
+      lastMoveTimestamp !== lastAnimatedTimestampRef.current &&
+      lastMovePath &&
+      lastMovePath.length > 1 &&
+      lastMovingPlayerUid
+    ) {
+      lastAnimatedTimestampRef.current = lastMoveTimestamp;
+      const targetPlayerUid = lastMovingPlayerUid;
+      const path = [...lastMovePath];
+
+      let currentIndex = 0;
+      // Start at initial path tile
+      setAnimatedPositions((prev) => ({
+        ...prev,
+        [targetPlayerUid]: path[0],
+      }));
+
+      const stepInterval = setInterval(() => {
+        currentIndex++;
+        if (currentIndex < path.length) {
+          const nextTile = path[currentIndex];
+          setAnimatedPositions((prev) => ({
+            ...prev,
+            [targetPlayerUid]: nextTile,
+          }));
+
+          // Play sound
+          if (GAME_CONFIG.LADDERS[nextTile]) {
+            sounds.playLadder();
+          } else if (GAME_CONFIG.SNAKES[nextTile]) {
+            sounds.playSnake();
+          } else {
+            sounds.playStep();
+          }
+        } else {
+          clearInterval(stepInterval);
+          // Settle to final server player position
+          const finalPlayer = players.find((p) => p.uid === targetPlayerUid);
+          if (finalPlayer) {
+            setAnimatedPositions((prev) => ({
+              ...prev,
+              [targetPlayerUid]: finalPlayer.position,
+            }));
+          }
+        }
+      }, 220); // 220ms per tile step for clear, satisfying motion
+
+      return () => clearInterval(stepInterval);
+    } else {
+      // If no active animation, keep all positions synced
+      const synced: { [uid: string]: number } = {};
+      players.forEach((p) => {
+        synced[p.uid] = p.position || 1;
+      });
+      setAnimatedPositions(synced);
+    }
+  }, [lastMoveTimestamp, lastMovePath, lastMovingPlayerUid]);
+
   // Pre-generate grid tiles 100 down to 1 (top to bottom)
   const tiles = useMemo(() => {
     const list = [];
@@ -129,7 +214,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({
                     </span>
                   )}
                   {tile.num === 1 && (
-                    <span className="text-[8px] md:text-[10px] px-0.5 text-emerald-700 dark:text-emerald-300 font-bold">
+                    <span className="text-[8px] md:text-[10px] px-0.5 text-emerald-700 font-bold">
                       စ
                     </span>
                   )}
@@ -178,12 +263,12 @@ export const GameBoard: React.FC<GameBoardProps> = ({
             {/* Draw Ladders */}
             {Object.entries(GAME_CONFIG.LADDERS).map(([startStr, endNum]) => {
               const startNum = parseInt(startStr);
-              const from = getTileCoordinates(startNum);
-              const to = getTileCoordinates(endNum);
+              const bottom = getTileCoordinates(startNum);
+              const top = getTileCoordinates(endNum);
 
-              // Calculate parallel lines for the two ladder rails
-              const dx = to.x - from.x;
-              const dy = to.y - from.y;
+              // Ladder angle and perpendicular offset for 2 parallel rails
+              const dx = top.x - bottom.x;
+              const dy = top.y - bottom.y;
               const len = Math.sqrt(dx * dx + dy * dy);
               if (len === 0) return null;
 
@@ -191,108 +276,79 @@ export const GameBoard: React.FC<GameBoardProps> = ({
               const px = (-dy / len) * railOffset;
               const py = (dx / len) * railOffset;
 
-              const r1x1 = from.x + px;
-              const r1y1 = from.y + py;
-              const r1x2 = to.x + px;
-              const r1y2 = to.y + py;
-
-              const r2x1 = from.x - px;
-              const r2y1 = from.y - py;
-              const r2x2 = to.x - px;
-              const r2y2 = to.y - py;
-
-              // Generate rungs
+              // Number of rungs
               const rungCount = Math.max(3, Math.floor(len / 4.5));
-              const rungs = [];
-              for (let i = 1; i < rungCount; i++) {
-                const t = i / rungCount;
-                const rx1 = r1x1 + (r1x2 - r1x1) * t;
-                const ry1 = r1y1 + (r1y2 - r1y1) * t;
-                const rx2 = r2x1 + (r2x2 - r2x1) * t;
-                const ry2 = r2y1 + (r2y2 - r2y1) * t;
-                rungs.push({ x1: rx1, y1: ry1, x2: rx2, y2: ry2 });
-              }
 
               return (
-                <g key={`ladder-${startNum}`} filter="url(#glowFilter)" opacity="0.92">
-                  {/* Rails */}
+                <g key={`ladder-${startNum}`} filter="url(#glowFilter)" opacity="0.95">
+                  {/* Left Rail */}
                   <line
-                    x1={r1x1}
-                    y1={r1y1}
-                    x2={r1x2}
-                    y2={r1y2}
-                    stroke="#B45309"
-                    strokeWidth="0.8"
-                    strokeLinecap="round"
-                  />
-                  <line
-                    x1={r2x1}
-                    y1={r2y1}
-                    x2={r2x2}
-                    y2={r2y2}
-                    stroke="#B45309"
-                    strokeWidth="0.8"
-                    strokeLinecap="round"
-                  />
-                  <line
-                    x1={r1x1}
-                    y1={r1y1}
-                    x2={r1x2}
-                    y2={r1y2}
+                    x1={bottom.x + px}
+                    y1={bottom.y + py}
+                    x2={top.x + px}
+                    y2={top.y + py}
                     stroke="url(#ladderGrad)"
-                    strokeWidth="0.5"
+                    strokeWidth="1.2"
                     strokeLinecap="round"
                   />
+                  {/* Right Rail */}
                   <line
-                    x1={r2x1}
-                    y1={r2y1}
-                    x2={r2x2}
-                    y2={r2y2}
+                    x1={bottom.x - px}
+                    y1={bottom.y - py}
+                    x2={top.x - px}
+                    y2={top.y - py}
                     stroke="url(#ladderGrad)"
-                    strokeWidth="0.5"
+                    strokeWidth="1.2"
                     strokeLinecap="round"
                   />
                   {/* Rungs */}
-                  {rungs.map((rung, idx) => (
-                    <line
-                      key={idx}
-                      x1={rung.x1}
-                      y1={rung.y1}
-                      x2={rung.x2}
-                      y2={rung.y2}
-                      stroke="#78350F"
-                      strokeWidth="0.5"
-                      strokeLinecap="round"
-                    />
-                  ))}
-                  {/* Top celebration icon */}
-                  <circle cx={to.x} cy={to.y} r="1.4" fill="#10B981" stroke="#ECFDF5" strokeWidth="0.3" />
+                  {Array.from({ length: rungCount }).map((_, rIdx) => {
+                    const t = (rIdx + 1) / (rungCount + 1);
+                    const rx = bottom.x + dx * t;
+                    const ry = bottom.y + dy * t;
+                    return (
+                      <line
+                        key={`rung-${rIdx}`}
+                        x1={rx + px}
+                        y1={ry + py}
+                        x2={rx - px}
+                        y2={ry - py}
+                        stroke="#FBBF24"
+                        strokeWidth="0.8"
+                        strokeLinecap="round"
+                      />
+                    );
+                  })}
                 </g>
               );
             })}
 
             {/* Draw Snakes */}
             {Object.entries(GAME_CONFIG.SNAKES).map(([startStr, endNum]) => {
-              const startNum = parseInt(startStr);
-              const head = getTileCoordinates(startNum);
+              const headNum = parseInt(startStr);
+              const head = getTileCoordinates(headNum);
               const tail = getTileCoordinates(endNum);
 
-              const midX = (head.x + tail.x) / 2 + (startNum % 2 === 0 ? 6 : -6);
-              const midY = (head.y + tail.y) / 2;
+              const dx = tail.x - head.x;
+              const dy = tail.y - head.y;
+              const len = Math.sqrt(dx * dx + dy * dy);
+              if (len === 0) return null;
 
-              const pathData = `M ${head.x} ${head.y} Q ${midX} ${midY} ${tail.x} ${tail.y}`;
+              // Wavy control points
+              const waveAmp = Math.min(10, len * 0.25);
+              const nx = -dy / len;
+              const ny = dx / len;
+
+              const cp1x = head.x + dx * 0.33 + nx * waveAmp;
+              const cp1y = head.y + dy * 0.33 + ny * waveAmp;
+              const cp2x = head.x + dx * 0.66 - nx * waveAmp;
+              const cp2y = head.y + dy * 0.66 - ny * waveAmp;
+
+              const pathData = `M ${head.x} ${head.y} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tail.x} ${tail.y}`;
 
               return (
-                <g key={`snake-${startNum}`} filter="url(#glowFilter)" opacity="0.95">
-                  {/* Snake body shadow */}
-                  <path
-                    d={pathData}
-                    fill="none"
-                    stroke="#450A0A"
-                    strokeWidth="2.2"
-                    strokeLinecap="round"
-                  />
-                  {/* Snake body */}
+                <g key={`snake-${headNum}`} filter="url(#glowFilter)" opacity="0.95">
+                  {/* Snake Body Main */}
                   <path
                     d={pathData}
                     fill="none"
@@ -306,7 +362,6 @@ export const GameBoard: React.FC<GameBoardProps> = ({
                     fill="none"
                     stroke="#FDE047"
                     strokeWidth="0.6"
-                    strokeDasharray="1 3"
                     strokeLinecap="round"
                   />
                   {/* Snake Head */}
@@ -321,15 +376,19 @@ export const GameBoard: React.FC<GameBoardProps> = ({
             })}
           </svg>
 
-          {/* Player Tokens Layer */}
+          {/* Player Tokens Layer with Step-by-Step Walking Animation */}
           <div className="absolute inset-0 pointer-events-none z-20">
             {players.map((player, pIdx) => {
-              const coords = getTileCoordinates(player.position);
+              // Current animated or settled tile
+              const currentPos = animatedPositions[player.uid] ?? player.position ?? 1;
+              const coords = getTileCoordinates(currentPos);
               const isTurn = pIdx === currentTurnIndex;
               const isMoving = movingPlayerId === player.uid;
 
               // If multiple players on same tile, slightly offset them
-              const playersOnSameTile = players.filter((p) => p.position === player.position);
+              const playersOnSameTile = players.filter(
+                (p) => (animatedPositions[p.uid] ?? p.position ?? 1) === currentPos
+              );
               const offsetIndex = playersOnSameTile.findIndex((p) => p.uid === player.uid);
               const totalOnTile = playersOnSameTile.length;
               let offsetX = 0;
@@ -343,22 +402,22 @@ export const GameBoard: React.FC<GameBoardProps> = ({
               return (
                 <div
                   key={player.uid}
-                  className={`absolute transition-all duration-500 ease-out flex flex-col items-center justify-center -translate-x-1/2 -translate-y-1/2 ${
+                  className={`absolute transition-all duration-300 ease-out flex flex-col items-center justify-center -translate-x-1/2 -translate-y-1/2 ${
                     isTurn ? 'z-30 scale-110' : 'z-20'
-                  } ${isMoving ? 'animate-bounce' : ''}`}
+                  } ${isMoving ? 'scale-125' : ''}`}
                   style={{
                     left: `${coords.x + offsetX}%`,
                     top: `${coords.y + offsetY}%`,
                   }}
                 >
-                  {/* Turn indicator halo */}
+                  {/* Turn indicator glow */}
                   {isTurn && (
                     <div className="absolute -inset-1.5 rounded-full bg-amber-400/50 animate-ping" />
                   )}
 
                   {/* Player Token Puck */}
                   <div
-                    className="relative w-6 h-6 md:w-8 md:h-8 rounded-full flex items-center justify-center shadow-lg border-2 border-white ring-2 text-white font-bold transition-transform duration-300"
+                    className="relative w-6 h-6 md:w-8 md:h-8 rounded-full flex items-center justify-center shadow-lg border-2 border-white ring-2 text-white font-bold transition-transform duration-200"
                     style={{
                       backgroundColor: player.color,
                       boxShadow: `0 4px 10px ${player.color}90`,
@@ -378,11 +437,19 @@ export const GameBoard: React.FC<GameBoardProps> = ({
                     <div className="absolute -bottom-1 -right-1 bg-slate-900 text-amber-300 rounded-full p-0.5 border border-amber-400 text-[10px]">
                       {renderTokenIcon(player.activeTokenSkin)}
                     </div>
+
+                    {/* Disconnected offline icon */}
+                    {player.isConnected === false && (
+                      <div className="absolute -top-1 -right-1 bg-rose-600 text-white rounded-full p-0.5 border border-white text-[9px] animate-pulse" title="အင်တာနက်ပြတ်တောက်နေသည်">
+                        <WifiOff className="w-2.5 h-2.5" />
+                      </div>
+                    )}
                   </div>
 
-                  {/* Small Name Tag */}
-                  <div className="mt-0.5 px-1 py-0.2 bg-slate-950/80 backdrop-blur-xs text-white text-[7px] md:text-[9px] font-semibold rounded truncate max-w-[50px] md:max-w-[65px] border border-white/20 text-center">
-                    {player.displayName}
+                  {/* Small Name Tag with current position */}
+                  <div className="mt-0.5 px-1 py-0.2 bg-slate-950/80 backdrop-blur-xs text-white text-[7px] md:text-[9px] font-semibold rounded truncate max-w-[55px] md:max-w-[70px] border border-white/20 text-center flex items-center gap-0.5 justify-center">
+                    <span>{player.displayName}</span>
+                    <span className="text-amber-300 font-mono">[{currentPos}]</span>
                   </div>
                 </div>
               );

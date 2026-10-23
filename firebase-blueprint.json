@@ -154,6 +154,38 @@
           "type": "boolean",
           "description": "Rule requirement: exact roll required to reach 100"
         },
+        "turnStartTimestamp": {
+          "type": "number",
+          "description": "Timestamp ms when turn began"
+        },
+        "turnDeadline": {
+          "type": "number",
+          "description": "Timestamp ms when 30s countdown expires"
+        },
+        "reconnectionDeadline": {
+          "type": "number",
+          "description": "Timestamp ms when 60s reconnection grace period expires"
+        },
+        "disconnectedPlayerId": {
+          "type": "string",
+          "description": "UID of disconnected player if any"
+        },
+        "disconnectedPlayerName": {
+          "type": "string",
+          "description": "Name of disconnected player"
+        },
+        "lastMoveTimestamp": {
+          "type": "number",
+          "description": "Timestamp ms of last move"
+        },
+        "lastMovePath": {
+          "type": "array",
+          "description": "Tile path array for animated movement"
+        },
+        "lastMovingPlayerUid": {
+          "type": "string",
+          "description": "UID of player who made the last move"
+        },
         "createdAt": {
           "type": "string",
           "description": "ISO timestamp of room creation"

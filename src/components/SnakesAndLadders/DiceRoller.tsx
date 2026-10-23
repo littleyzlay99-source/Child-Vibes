@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { sounds } from '../../lib/sound';
-import { Dices, Sparkles, User, Trophy } from 'lucide-react';
+import { Dices, Sparkles, User, Clock, AlertTriangle } from 'lucide-react';
 import { RoomPlayer } from '../../types';
 
 interface DiceRollerProps {
@@ -11,6 +11,8 @@ interface DiceRollerProps {
   onRollDice: (rollResult: number) => Promise<void>;
   disabled: boolean;
   diceSkin?: string;
+  turnDeadline?: number;
+  onTimeout?: () => void;
 }
 
 export const DiceRoller: React.FC<DiceRollerProps> = ({
@@ -21,28 +23,63 @@ export const DiceRoller: React.FC<DiceRollerProps> = ({
   onRollDice,
   disabled,
   diceSkin = 'dice_classic',
+  turnDeadline = 0,
+  onTimeout,
 }) => {
   const [isRolling, setIsRolling] = useState(false);
   const [displayRoll, setDisplayRoll] = useState(lastDiceRoll || 1);
+  const [secondsLeft, setSecondsLeft] = useState<number>(30);
+
+  // Synchronize 30-Second Countdown with server turnDeadline
+  useEffect(() => {
+    if (!turnDeadline || turnDeadline <= 0) {
+      setSecondsLeft(30);
+      return;
+    }
+
+    const updateTimer = () => {
+      const now = Date.now();
+      const diffMs = turnDeadline - now;
+      const secs = Math.max(0, Math.ceil(diffMs / 1000));
+      setSecondsLeft(secs);
+
+      if (secs <= 0 && isMyTurn && !isRolling && !disabled) {
+        if (onTimeout) {
+          onTimeout();
+        }
+      }
+    };
+
+    updateTimer();
+    const interval = setInterval(updateTimer, 500);
+    return () => clearInterval(interval);
+  }, [turnDeadline, isMyTurn, isRolling, disabled, onTimeout]);
+
+  // Keep display roll synced with lastDiceRoll from room state
+  useEffect(() => {
+    if (lastDiceRoll && !isRolling) {
+      setDisplayRoll(lastDiceRoll);
+    }
+  }, [lastDiceRoll, isRolling]);
 
   const handleRollClick = async () => {
     if (!isMyTurn || isRolling || disabled) return;
     setIsRolling(true);
     sounds.playDiceRoll();
 
-    // Roll animation with random faces
+    // Roll animation with rotating random numbers
     let rollCount = 0;
     const interval = setInterval(() => {
       setDisplayRoll(Math.floor(Math.random() * 6) + 1);
       rollCount++;
-      if (rollCount > 10) {
+      if (rollCount >= 8) {
         clearInterval(interval);
         const finalRoll = Math.floor(Math.random() * 6) + 1;
         setDisplayRoll(finalRoll);
         setIsRolling(false);
         onRollDice(finalRoll);
       }
-    }, 70);
+    }, 60);
   };
 
   // Dice dot patterns
@@ -114,10 +151,12 @@ export const DiceRoller: React.FC<DiceRollerProps> = ({
     return 'bg-slate-50 text-slate-900 border-2 border-slate-300 shadow-lg';
   };
 
+  const isLowTime = secondsLeft <= 8;
+
   return (
-    <div className="w-full bg-white border border-slate-200/90 rounded-2xl p-4 shadow-sm backdrop-blur-md">
+    <div className="w-full bg-white border border-slate-200/90 rounded-2xl p-4 shadow-xs backdrop-blur-md">
       <div className="flex flex-col md:flex-row items-center justify-between gap-4">
-        {/* Left: Current Turn Info */}
+        {/* Left: Active Player Banner & Turn indicator */}
         <div className="flex items-center gap-3 w-full md:w-auto">
           <div className="relative">
             <div
@@ -140,22 +179,41 @@ export const DiceRoller: React.FC<DiceRollerProps> = ({
           </div>
 
           <div>
-            <div className="text-xs font-semibold text-slate-500">လက်ရှိအလှည့်</div>
-            <div className="text-base font-bold text-slate-900 flex items-center gap-2">
+            <div className="text-xs font-semibold text-slate-500 flex items-center gap-2">
+              <span>လက်ရှိအလှည့်</span>
+              {/* 30s Countdown Badge */}
+              <div
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-mono font-bold transition-colors ${
+                  isLowTime
+                    ? 'bg-rose-100 text-rose-800 border border-rose-300 animate-pulse'
+                    : 'bg-amber-100 text-amber-900 border border-amber-300'
+                }`}
+              >
+                <Clock className="w-3 h-3" />
+                <span>{secondsLeft}s ကျန်</span>
+              </div>
+            </div>
+
+            <div className="text-base font-bold text-slate-900 flex items-center gap-2 mt-0.5">
               <span>{currentTurnPlayer?.displayName || 'ကစားသမား'}</span>
-              {isMyTurn && (
-                <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-bold">
+              {isMyTurn ? (
+                <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-400 text-slate-950 font-black shadow-xs">
                   သင့်အလှည့်ဖြစ်ပါသည်
+                </span>
+              ) : (
+                <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200">
+                  {currentTurnPlayer?.displayName} ခေါက်နေဆဲ
                 </span>
               )}
             </div>
+
             <div className="text-xs text-slate-500">
               လက်ရှိနေရာ: <span className="text-amber-700 font-bold">အကွက် {currentTurnPlayer?.position || 1}</span> / ၁၀၀
             </div>
           </div>
         </div>
 
-        {/* Center: Dice Display & Roll Action */}
+        {/* Center: 3D Dice Display & Roll Action Button */}
         <div className="flex items-center gap-4 w-full md:w-auto justify-center">
           {/* 3D Dice Box */}
           <div
@@ -170,7 +228,7 @@ export const DiceRoller: React.FC<DiceRollerProps> = ({
           <button
             onClick={handleRollClick}
             disabled={!isMyTurn || isRolling || disabled}
-            className={`px-6 py-3.5 rounded-xl font-bold text-sm md:text-base flex items-center gap-2 transition-all duration-200 ${
+            className={`px-6 py-3.5 rounded-xl font-black text-sm md:text-base flex items-center gap-2 transition-all duration-200 ${
               isMyTurn && !isRolling && !disabled
                 ? 'bg-amber-400 hover:bg-amber-500 text-slate-950 shadow-sm hover:scale-105 cursor-pointer active:scale-95 animate-pulse'
                 : 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200'
@@ -181,8 +239,8 @@ export const DiceRoller: React.FC<DiceRollerProps> = ({
               {isRolling
                 ? 'အံစာတုံး လှည့်နေသည်...'
                 : isMyTurn
-                ? 'အံစာတုံး ခေါက်မည်'
-                : 'စောင့်ဆိုင်းပါ...'}
+                ? `အံစာတုံး ခေါက်မည် (${secondsLeft}s)`
+                : `စောင့်ဆိုင်းပါ (${currentTurnPlayer?.displayName || 'အခြားသူ'} အလှည့်)`}
             </span>
           </button>
         </div>

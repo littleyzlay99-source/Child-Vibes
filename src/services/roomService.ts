@@ -1,11 +1,10 @@
 import {
-  collection,
   doc,
   setDoc,
   getDoc,
   updateDoc,
-  onSnapshot,
   deleteDoc,
+  runTransaction,
   serverTimestamp,
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../lib/firebase';
@@ -33,6 +32,7 @@ export async function createGameRoom(
   const roomCode = generateRoomCode();
   const roomId = `room_${roomCode}`;
   const roomRef = doc(db, 'rooms', roomId);
+  const now = Date.now();
 
   const initialPlayer: RoomPlayer = {
     uid: hostUser.id,
@@ -43,6 +43,8 @@ export async function createGameRoom(
     color: GAME_CONFIG.PLAYER_COLORS[0].hex,
     position: 1, // Start position is tile 1
     activeTokenSkin: hostUser.activeTokenSkin || 'token_crown',
+    isConnected: true,
+    lastSeen: now,
   };
 
   const newRoom: GameRoom = {
@@ -60,6 +62,12 @@ export async function createGameRoom(
     winnerId: null,
     winnerName: null,
     exactFinish,
+    turnStartTimestamp: 0,
+    turnDeadline: 0,
+    reconnectionDeadline: null,
+    disconnectedPlayerId: null,
+    disconnectedPlayerName: null,
+    lastMoveTimestamp: now,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
@@ -86,6 +94,7 @@ export async function joinGameRoomByCode(
   const cleanedCode = roomCodeInput.trim().toUpperCase();
   const roomId = `room_${cleanedCode}`;
   const roomRef = doc(db, 'rooms', roomId);
+  const now = Date.now();
 
   try {
     const roomSnap = await getDoc(roomRef);
@@ -94,14 +103,20 @@ export async function joinGameRoomByCode(
     }
 
     const roomData = roomSnap.data() as GameRoom;
-    if (roomData.status !== 'waiting') {
-      throw new Error('ဤဂိမ်းပွဲသည် စတင်ပြီး သို့မဟုတ် ပြီးဆုံးသွားပါပြီ။');
+    if (roomData.status === 'finished') {
+      throw new Error('ဤဂိမ်းပွဲသည် ပြီးဆုံးသွားပါပြီ။');
     }
 
-    // Check if player already in room
+    // Check if player already in room (Reconnecting or returning player)
     const existingIndex = roomData.players.findIndex((p) => p.uid === user.id);
     if (existingIndex >= 0) {
-      return roomId; // Already in room, proceed
+      // Reconnect existing player
+      await reconnectPlayerToRoom(roomId, user.id);
+      return roomId;
+    }
+
+    if (roomData.status !== 'waiting') {
+      throw new Error('ဂိမ်းစတင်ပြီးဖြစ်သောကြောင့် အသစ်ဝင်ရောက်၍ မရတော့ပါ။');
     }
 
     if (roomData.players.length >= roomData.maxPlayers) {
@@ -123,6 +138,8 @@ export async function joinGameRoomByCode(
       color: availableColor,
       position: 1,
       activeTokenSkin: user.activeTokenSkin || 'token_crown',
+      isConnected: true,
+      lastSeen: now,
     };
 
     const updatedPlayers = [...roomData.players, newPlayer];
@@ -140,6 +157,205 @@ export async function joinGameRoomByCode(
     }
     handleFirestoreError(error, OperationType.GET, `rooms/${roomId}`);
     throw error;
+  }
+}
+
+/**
+ * Reconnect a returning player to their active room
+ */
+export async function reconnectPlayerToRoom(roomId: string, userId: string) {
+  const roomRef = doc(db, 'rooms', roomId);
+  const now = Date.now();
+  try {
+    await runTransaction(db, async (transaction) => {
+      const roomSnap = await transaction.get(roomRef);
+      if (!roomSnap.exists()) return;
+      const room = roomSnap.data() as GameRoom;
+
+      let changed = false;
+      const updatedPlayers = room.players.map((p) => {
+        if (p.uid === userId) {
+          changed = true;
+          return {
+            ...p,
+            isConnected: true,
+            lastSeen: now,
+            disconnectedAt: null,
+          };
+        }
+        return p;
+      });
+
+      if (!changed) return;
+
+      const updates: any = {
+        players: updatedPlayers,
+        updatedAt: new Date().toISOString(),
+      };
+
+      // Clear disconnection alert if this was the disconnected player
+      if (room.disconnectedPlayerId === userId) {
+        updates.disconnectedPlayerId = null;
+        updates.disconnectedPlayerName = null;
+        updates.reconnectionDeadline = null;
+        const reconnectedPlayer = room.players.find((p) => p.uid === userId);
+        updates.lastMoveSummary = `ကစားသမား ${reconnectedPlayer?.displayName || ''} ပြန်လည်ချိတ်ဆက်မိပါပြီ။`;
+      }
+
+      transaction.update(roomRef, updates);
+    });
+  } catch (error) {
+    console.warn('Reconnect update notice:', error);
+  }
+}
+
+/**
+ * Send heartbeat to indicate player is connected and active
+ */
+export async function updatePlayerPresence(roomId: string, userId: string) {
+  const roomRef = doc(db, 'rooms', roomId);
+  const now = Date.now();
+  try {
+    const roomSnap = await getDoc(roomRef);
+    if (!roomSnap.exists()) return;
+    const room = roomSnap.data() as GameRoom;
+
+    let hasChange = false;
+    const updatedPlayers = room.players.map((p) => {
+      if (p.uid === userId) {
+        if (!p.isConnected || now - (p.lastSeen || 0) > 8000) {
+          hasChange = true;
+          return { ...p, isConnected: true, lastSeen: now, disconnectedAt: null };
+        }
+      }
+      return p;
+    });
+
+    if (hasChange) {
+      await updateDoc(roomRef, {
+        players: updatedPlayers,
+      });
+    }
+  } catch (error) {
+    // Non-blocking heartbeat error
+  }
+}
+
+/**
+ * Mark a player as disconnected and start 60s reconnection grace period
+ */
+export async function markPlayerDisconnected(roomId: string, userId: string) {
+  const roomRef = doc(db, 'rooms', roomId);
+  const now = Date.now();
+  try {
+    await runTransaction(db, async (transaction) => {
+      const roomSnap = await transaction.get(roomRef);
+      if (!roomSnap.exists()) return;
+      const room = roomSnap.data() as GameRoom;
+
+      let discPlayerName = '';
+      const updatedPlayers = room.players.map((p) => {
+        if (p.uid === userId) {
+          discPlayerName = p.displayName;
+          return {
+            ...p,
+            isConnected: false,
+            disconnectedAt: now,
+          };
+        }
+        return p;
+      });
+
+      if (!discPlayerName) return;
+
+      transaction.update(roomRef, {
+        players: updatedPlayers,
+        disconnectedPlayerId: userId,
+        disconnectedPlayerName: discPlayerName,
+        reconnectionDeadline: now + 60000, // 60 seconds grace period
+        lastMoveSummary: `ကစားသမား ${discPlayerName} ၏ အင်တာနက်လိုင်း ပြတ်တောက်နေပါသည်။ ပြန်လည်ချိတ်ဆက်ရန် ၆၀ စက္ကန့် စောင့်ဆိုင်းပေးပါ...`,
+        updatedAt: new Date().toISOString(),
+      });
+    });
+  } catch (error) {
+    console.warn('Mark disconnected error:', error);
+  }
+}
+
+/**
+ * Handle 60s Reconnection Timeout if player fails to rejoin
+ */
+export async function handleReconnectionTimeout(roomId: string) {
+  const roomRef = doc(db, 'rooms', roomId);
+  const now = Date.now();
+  try {
+    await runTransaction(db, async (transaction) => {
+      const roomSnap = await transaction.get(roomRef);
+      if (!roomSnap.exists()) return;
+      const room = roomSnap.data() as GameRoom;
+
+      if (!room.reconnectionDeadline || now < room.reconnectionDeadline) return;
+
+      const timedOutPlayerId = room.disconnectedPlayerId;
+      const timedOutName = room.disconnectedPlayerName || 'ကစားသမား';
+
+      let nextTurn = room.currentTurnIndex;
+      // If current turn belongs to timed out player, skip to next player
+      if (room.players[room.currentTurnIndex]?.uid === timedOutPlayerId) {
+        nextTurn = (room.currentTurnIndex + 1) % room.players.length;
+      }
+
+      transaction.update(roomRef, {
+        disconnectedPlayerId: null,
+        disconnectedPlayerName: null,
+        reconnectionDeadline: null,
+        currentTurnIndex: nextTurn,
+        turnStartTimestamp: now,
+        turnDeadline: now + 30000,
+        lastMoveSummary: `${timedOutName} သည် သတ်မှတ်ချိန်အတွင်း ပြန်မဝင်နိုင်သဖြင့် အလှည့်ကျော်လွှားပါသည်`,
+        updatedAt: new Date().toISOString(),
+      });
+    });
+  } catch (error) {
+    console.warn('Reconnection timeout error:', error);
+  }
+}
+
+/**
+ * Handle 30-Second Turn Timeout Skip
+ */
+export async function handleTurnTimeout(roomId: string) {
+  const roomRef = doc(db, 'rooms', roomId);
+  const now = Date.now();
+  try {
+    await runTransaction(db, async (transaction) => {
+      const roomSnap = await transaction.get(roomRef);
+      if (!roomSnap.exists()) return;
+      const room = roomSnap.data() as GameRoom;
+
+      // Only skip if game is playing and turnDeadline has passed
+      if (room.status !== 'playing' || !room.turnDeadline || now < room.turnDeadline) {
+        return;
+      }
+
+      // If waiting on reconnection, don't auto-skip turn timer
+      if (room.reconnectionDeadline && now < room.reconnectionDeadline) {
+        return;
+      }
+
+      const timedOutPlayer = room.players[room.currentTurnIndex];
+      const nextTurn = (room.currentTurnIndex + 1) % room.players.length;
+
+      transaction.update(roomRef, {
+        currentTurnIndex: nextTurn,
+        turnStartTimestamp: now,
+        turnDeadline: now + 30000, // 30 seconds for next turn
+        lastMoveSummary: `⏰ ${timedOutPlayer?.displayName || 'ကစားသမား'} ၏ စက္ကန့် ၃၀ အချိန်ပြည့်သွားသဖြင့် နောက်ကစားသမားထံ အလှည့်ပေးလိုက်ပါသည်`,
+        updatedAt: new Date().toISOString(),
+      });
+    });
+  } catch (error) {
+    console.warn('Turn timeout skip notice:', error);
   }
 }
 
@@ -170,15 +386,20 @@ export async function togglePlayerReady(roomId: string, userId: string, isReady:
 }
 
 /**
- * Start Game (Host only)
+ * Start Game (Host only) - initializes 30-second turn timer
  */
 export async function startGame(roomId: string) {
   const roomRef = doc(db, 'rooms', roomId);
+  const now = Date.now();
   try {
     await updateDoc(roomRef, {
       status: 'playing',
       currentTurnIndex: 0,
-      lastMoveSummary: 'ဂိမ်းစတင်ပါပြီ! ကံကောင်းပါစေ!',
+      turnStartTimestamp: now,
+      turnDeadline: now + 30000, // 30 seconds for first turn
+      reconnectionDeadline: null,
+      disconnectedPlayerId: null,
+      lastMoveSummary: 'ဂိမ်းစတင်ပါပြီ! ပထမဆုံး ကစားသမား အံစာတုံး စတင်ခေါက်ပါ!',
       updatedAt: new Date().toISOString(),
     });
   } catch (error) {
@@ -220,11 +441,14 @@ export async function leaveGameRoom(roomId: string, userId: string) {
       nextTurn = 0;
     }
 
+    const now = Date.now();
     await updateDoc(roomRef, {
       players: remainingPlayers,
       hostId: newHostId,
       hostName: newHostName,
       currentTurnIndex: nextTurn,
+      turnStartTimestamp: now,
+      turnDeadline: now + 30000,
       lastMoveSummary: `ကစားသမားတစ်ဦး အခန်းမှ ထွက်ခွာသွားပါသည်။`,
       updatedAt: new Date().toISOString(),
     });
@@ -234,94 +458,153 @@ export async function leaveGameRoom(roomId: string, userId: string) {
 }
 
 /**
- * Make Turn: Roll Dice, calculate next position with snakes & ladders, check win condition
+ * Make Turn: Atomic Firebase Transaction with authoritative dice roll,
+ * step-by-step movement path generation, snake/ladder logic, 30s timer, and victory detection.
  */
 export async function executeDiceRollAndMove(
   roomId: string,
   rollingPlayerUid: string,
-  diceRoll: number
-): Promise<{ newPos: number; eventSummary: string; won: boolean }> {
+  clientRolledValue?: number
+): Promise<{ newPos: number; diceRoll: number; eventSummary: string; won: boolean; movePath: number[] }> {
   const roomRef = doc(db, 'rooms', roomId);
-  const roomSnap = await getDoc(roomRef);
-  if (!roomSnap.exists()) {
-    throw new Error('အခန်း မတွေ့ပါ');
-  }
+  const now = Date.now();
 
-  const room = roomSnap.data() as GameRoom;
-  const playerIndex = room.players.findIndex((p) => p.uid === rollingPlayerUid);
-  if (playerIndex < 0 || playerIndex !== room.currentTurnIndex) {
-    throw new Error('သင့်အလှည့် မဟုတ်သေးပါ');
-  }
+  try {
+    return await runTransaction(db, async (transaction) => {
+      const roomSnap = await transaction.get(roomRef);
+      if (!roomSnap.exists()) {
+        throw new Error('အခန်း မတွေ့ပါ');
+      }
 
-  const currentPlayer = room.players[playerIndex];
-  let targetPos = currentPlayer.position + diceRoll;
-  let eventSummary = `${currentPlayer.displayName} မှ အံစာတုံး [${diceRoll}] ကျပါသည်`;
-  let won = false;
+      const room = roomSnap.data() as GameRoom;
 
-  if (targetPos > 100) {
-    if (room.exactFinish) {
-      // Exact roll required: bounces back
-      const overflow = targetPos - 100;
-      targetPos = 100 - overflow;
-      eventSummary += `။ ၁၀၀ ကျော်သွား၍ အကွက် ${targetPos} သို့ ပြန်ဆင်းပါသည်`;
-    } else {
-      // Reached 100
-      targetPos = 100;
-    }
-  }
+      if (room.status !== 'playing') {
+        throw new Error('ဂိမ်းသည် ဆော့ကစားဆဲ အခြေအနေ မဟုတ်ပါ');
+      }
 
-  // Check Ladders
-  if (GAME_CONFIG.LADDERS[targetPos]) {
-    const climbedTo = GAME_CONFIG.LADDERS[targetPos];
-    eventSummary += `။ လှေကားတွေ့ရှိသဖြင့် အကွက် ${targetPos} မှ ${climbedTo} သို့ တက်လှမ်းပါသည်! 🎉`;
-    targetPos = climbedTo;
-  }
-  // Check Snakes
-  else if (GAME_CONFIG.SNAKES[targetPos]) {
-    const bittenTo = GAME_CONFIG.SNAKES[targetPos];
-    eventSummary += `။ မြွေကိုက်ခံရသဖြင့် အကွက် ${targetPos} မှ ${bittenTo} သို့ လျှောကျသွားပါသည်! 🐍`;
-    targetPos = bittenTo;
-  }
+      if (room.winnerId) {
+        throw new Error('ဂိမ်းပြီးဆုံးသွားပါပြီ');
+      }
 
-  if (targetPos >= 100) {
-    targetPos = 100;
-    won = true;
-    eventSummary = `🏆 ${currentPlayer.displayName} သည် နံပါတ် ၁၀၀ သို့ ပထမဆုံးရောက်ရှိပြီး အနိုင်ရရှိသွားပါပြီ!`;
-  }
+      const playerIndex = room.players.findIndex((p) => p.uid === rollingPlayerUid);
+      if (playerIndex < 0) {
+        throw new Error('ဤအခန်းတွင် သင်မပါဝင်ပါ');
+      }
 
-  // Next player's turn (rolling 6 gives extra turn if standard rules, or cycle turn)
-  let nextTurnIndex = room.currentTurnIndex;
-  if (!won) {
-    if (diceRoll === 6) {
-      eventSummary += ' (အံစာတုံး ၆ ကျသဖြင့် နောက်တစ်ကြိမ် ထပ်ခေါက်ခွင့်ရရှိပါသည်!)';
-    } else {
-      nextTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
-    }
-  }
+      if (playerIndex !== room.currentTurnIndex) {
+        throw new Error('သင့်အလှည့် မဟုတ်သေးပါ (တစ်လှည့်စီသာ ကစားရပါမည်)');
+      }
 
-  const updatedPlayers = room.players.map((p, idx) => {
-    if (idx === playerIndex) {
+      const currentPlayer = room.players[playerIndex];
+      const startPos = currentPlayer.position || 1;
+
+      // Authoritative Dice Roll: validate client roll 1-6 or generate
+      const diceRoll =
+        clientRolledValue && clientRolledValue >= 1 && clientRolledValue <= 6
+          ? clientRolledValue
+          : Math.floor(Math.random() * 6) + 1;
+
+      let targetPos = startPos + diceRoll;
+      let eventSummary = `${currentPlayer.displayName} မှ အံစာတုံး [${diceRoll}] ကျပါသည်`;
+      let won = false;
+
+      // Construct step-by-step tile path: e.g. [1, 2, 3, 4, 5]
+      const movePath: number[] = [startPos];
+      for (let s = startPos + 1; s <= startPos + diceRoll; s++) {
+        if (s <= 100) {
+          movePath.push(s);
+        } else if (room.exactFinish) {
+          // Bounce backward on overflow
+          const overflow = s - 100;
+          movePath.push(100 - overflow);
+        } else {
+          movePath.push(100);
+        }
+      }
+
+      if (targetPos > 100) {
+        if (room.exactFinish) {
+          // Exact roll required: bounces back
+          const overflow = targetPos - 100;
+          targetPos = 100 - overflow;
+          eventSummary += `။ ၁၀၀ ကျော်သွား၍ အကွက် ${targetPos} သို့ ပြန်ဆင်းပါသည်`;
+        } else {
+          targetPos = 100;
+        }
+      }
+
+      // Check Ladders
+      if (GAME_CONFIG.LADDERS[targetPos]) {
+        const climbedTo = GAME_CONFIG.LADDERS[targetPos];
+        eventSummary += `။ လှေကားတွေ့ရှိသဖြင့် အကွက် ${targetPos} မှ ${climbedTo} သို့ တက်လှမ်းပါသည်! 🎉`;
+        movePath.push(climbedTo);
+        targetPos = climbedTo;
+      }
+      // Check Snakes
+      else if (GAME_CONFIG.SNAKES[targetPos]) {
+        const bittenTo = GAME_CONFIG.SNAKES[targetPos];
+        eventSummary += `။ မြွေကိုက်ခံရသဖြင့် အကွက် ${targetPos} မှ ${bittenTo} သို့ လျှောကျသွားပါသည်! 🐍`;
+        movePath.push(bittenTo);
+        targetPos = bittenTo;
+      }
+
+      if (targetPos >= 100) {
+        targetPos = 100;
+        won = true;
+        eventSummary = `🏆 ${currentPlayer.displayName} သည် နံပါတ် ၁၀၀ သို့ ပထမဆုံးရောက်ရှိပြီး အနိုင်ရရှိသွားပါပြီ!`;
+      }
+
+      // Turn System: If rolled 6, player gets another turn (unless won)
+      let nextTurnIndex = room.currentTurnIndex;
+      if (!won) {
+        if (diceRoll === 6) {
+          eventSummary += ' (အံစာတုံး ၆ ကျသဖြင့် နောက်တစ်ကြိမ် ထပ်ခေါက်ခွင့်ရပါသည်!)';
+        } else {
+          nextTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
+        }
+      }
+
+      const updatedPlayers = room.players.map((p, idx) => {
+        if (idx === playerIndex) {
+          return {
+            ...p,
+            position: targetPos,
+            rank: won ? 1 : p.rank,
+            lastSeen: now,
+            isConnected: true,
+          };
+        }
+        return p;
+      });
+
+      transaction.update(roomRef, {
+        players: updatedPlayers,
+        lastDiceRoll: diceRoll,
+        lastMoveSummary: eventSummary,
+        lastMoveTimestamp: now,
+        lastMovePath: movePath,
+        lastMovingPlayerUid: currentPlayer.uid,
+        currentTurnIndex: nextTurnIndex,
+        turnStartTimestamp: now,
+        turnDeadline: won ? 0 : now + 30000, // 30 seconds for next turn
+        status: won ? 'finished' : 'playing',
+        winnerId: won ? currentPlayer.uid : null,
+        winnerName: won ? currentPlayer.displayName : null,
+        updatedAt: new Date().toISOString(),
+      });
+
       return {
-        ...p,
-        position: targetPos,
-        rank: won ? 1 : p.rank,
+        newPos: targetPos,
+        diceRoll,
+        eventSummary,
+        won,
+        movePath,
       };
-    }
-    return p;
-  });
-
-  await updateDoc(roomRef, {
-    players: updatedPlayers,
-    lastDiceRoll: diceRoll,
-    lastMoveSummary: eventSummary,
-    currentTurnIndex: nextTurnIndex,
-    status: won ? 'finished' : 'playing',
-    winnerId: won ? currentPlayer.uid : null,
-    winnerName: won ? currentPlayer.displayName : null,
-    updatedAt: new Date().toISOString(),
-  });
-
-  return { newPos: targetPos, eventSummary, won };
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `rooms/${roomId}`);
+    throw error;
+  }
 }
 
 /**
@@ -329,25 +612,38 @@ export async function executeDiceRollAndMove(
  */
 export async function resetRoomToPlayAgain(roomId: string) {
   const roomRef = doc(db, 'rooms', roomId);
-  const roomSnap = await getDoc(roomRef);
-  if (!roomSnap.exists()) return;
-  const room = roomSnap.data() as GameRoom;
+  const now = Date.now();
+  try {
+    const roomSnap = await getDoc(roomRef);
+    if (!roomSnap.exists()) return;
+    const room = roomSnap.data() as GameRoom;
 
-  const resetPlayers = room.players.map((p) => ({
-    ...p,
-    position: 1,
-    isReady: p.uid === room.hostId, // Host is ready
-    rank: undefined,
-  }));
+    const resetPlayers = room.players.map((p) => ({
+      ...p,
+      position: 1,
+      isReady: p.uid === room.hostId, // Host is ready
+      rank: undefined,
+      isConnected: true,
+      lastSeen: now,
+    }));
 
-  await updateDoc(roomRef, {
-    players: resetPlayers,
-    status: 'waiting',
-    currentTurnIndex: 0,
-    lastDiceRoll: 1,
-    lastMoveSummary: 'ဂိမ်းအသစ် ပြန်လည်စတင်ရန် အဆင်သင့်ဖြစ်ပါပြီ!',
-    winnerId: null,
-    winnerName: null,
-    updatedAt: new Date().toISOString(),
-  });
+    await updateDoc(roomRef, {
+      players: resetPlayers,
+      status: 'waiting',
+      currentTurnIndex: 0,
+      lastDiceRoll: 1,
+      turnStartTimestamp: 0,
+      turnDeadline: 0,
+      reconnectionDeadline: null,
+      disconnectedPlayerId: null,
+      disconnectedPlayerName: null,
+      lastMoveSummary: 'ဂိမ်းအသစ် ပြန်လည်စတင်ရန် အဆင်သင့်ဖြစ်ပါပြီ!',
+      winnerId: null,
+      winnerName: null,
+      lastMoveTimestamp: now,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `rooms/${roomId}`);
+  }
 }

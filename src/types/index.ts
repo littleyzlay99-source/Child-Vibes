@@ -50,6 +50,9 @@ export interface RoomPlayer {
   position: number; // 1 to 100
   rank?: number;
   activeTokenSkin?: string;
+  isConnected: boolean; // Internet connection status
+  lastSeen: number; // Timestamp in milliseconds
+  disconnectedAt?: number | null; // Timestamp when disconnected
 }
 
 export interface GameRoom {
@@ -67,6 +70,15 @@ export interface GameRoom {
   winnerId: string | null;
   winnerName: string | null;
   exactFinish: boolean;
+  // Timer & Realtime Turn Management
+  turnStartTimestamp: number; // Timestamp ms when turn began
+  turnDeadline: number; // Timestamp ms (turnStartTimestamp + 30000)
+  reconnectionDeadline: number | null; // Timestamp ms (now + 60000)
+  disconnectedPlayerId: string | null;
+  disconnectedPlayerName: string | null;
+  lastMoveTimestamp: number; // Timestamp ms of last move action
+  lastMovePath?: number[]; // Step-by-step path tiles for smooth animation across clients
+  lastMovingPlayerUid?: string | null;
   createdAt: string;
   updatedAt: string;
 }
