@@ -458,6 +458,22 @@ export async function leaveGameRoom(roomId: string, userId: string) {
 }
 
 /**
+ * Cryptographically fair random dice roll (1 to 6)
+ */
+export function generateSecureDiceRoll(): number {
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    const buffer = new Uint32Array(1);
+    crypto.getRandomValues(buffer);
+    // Unbiased roll 1 to 6
+    const limit = 4294967292; // 0xFFFFFFFC
+    if (buffer[0] < limit) {
+      return (buffer[0] % 6) + 1;
+    }
+  }
+  return Math.floor(Math.random() * 6) + 1;
+}
+
+/**
  * Make Turn: Atomic Firebase Transaction with authoritative dice roll,
  * step-by-step movement path generation, snake/ladder logic, 30s timer, and victory detection.
  */
@@ -496,13 +512,15 @@ export async function executeDiceRollAndMove(
       }
 
       const currentPlayer = room.players[playerIndex];
-      const startPos = currentPlayer.position || 1;
+      const startPos = typeof currentPlayer.position === 'number' && !isNaN(currentPlayer.position)
+        ? Math.max(1, Math.min(100, currentPlayer.position))
+        : 1;
 
-      // Authoritative Dice Roll: validate client roll 1-6 or generate
+      // Authoritative Secure Dice Roll (1 to 6)
       const diceRoll =
         clientRolledValue && clientRolledValue >= 1 && clientRolledValue <= 6
           ? clientRolledValue
-          : Math.floor(Math.random() * 6) + 1;
+          : generateSecureDiceRoll();
 
       let targetPos = startPos + diceRoll;
       let eventSummary = `${currentPlayer.displayName} မှ အံစာတုံး [${diceRoll}] ကျပါသည်`;
@@ -510,23 +528,21 @@ export async function executeDiceRollAndMove(
 
       // Construct step-by-step tile path: e.g. [1, 2, 3, 4, 5]
       const movePath: number[] = [startPos];
-      for (let s = startPos + 1; s <= startPos + diceRoll; s++) {
-        if (s <= 100) {
+      if (startPos + diceRoll <= 100) {
+        for (let s = startPos + 1; s <= startPos + diceRoll; s++) {
           movePath.push(s);
-        } else if (room.exactFinish) {
-          // Bounce backward on overflow
-          const overflow = s - 100;
-          movePath.push(100 - overflow);
-        } else {
-          movePath.push(100);
         }
-      }
-
-      if (targetPos > 100) {
+      } else {
+        // Exceeded 100
+        for (let s = startPos + 1; s <= 100; s++) {
+          movePath.push(s);
+        }
         if (room.exactFinish) {
-          // Exact roll required: bounces back
-          const overflow = targetPos - 100;
+          const overflow = (startPos + diceRoll) - 100;
           targetPos = 100 - overflow;
+          for (let b = 1; b <= overflow; b++) {
+            movePath.push(100 - b);
+          }
           eventSummary += `။ ၁၀၀ ကျော်သွား၍ အကွက် ${targetPos} သို့ ပြန်ဆင်းပါသည်`;
         } else {
           targetPos = 100;
@@ -564,17 +580,30 @@ export async function executeDiceRollAndMove(
         }
       }
 
+      // Build sanitized players array - NEVER include undefined values for Firestore
       const updatedPlayers = room.players.map((p, idx) => {
-        if (idx === playerIndex) {
-          return {
-            ...p,
-            position: targetPos,
-            rank: won ? 1 : p.rank,
-            lastSeen: now,
-            isConnected: true,
-          };
+        const isMover = idx === playerIndex;
+        const playerObj: any = {
+          uid: p.uid,
+          playerId: p.playerId || `PL-${p.uid.substring(0, 6)}`,
+          displayName: p.displayName || 'ကစားသမား',
+          photoURL: p.photoURL || '',
+          isReady: !!p.isReady,
+          color: p.color || '#3B82F6',
+          position: isMover ? targetPos : (p.position || 1),
+          activeTokenSkin: p.activeTokenSkin || 'token_crown',
+          isConnected: p.isConnected !== false,
+          lastSeen: isMover ? now : (p.lastSeen || now),
+        };
+        if (isMover && won) {
+          playerObj.rank = 1;
+        } else if (p.rank !== undefined && p.rank !== null) {
+          playerObj.rank = p.rank;
         }
-        return p;
+        if (p.disconnectedAt !== undefined && p.disconnectedAt !== null) {
+          playerObj.disconnectedAt = p.disconnectedAt;
+        }
+        return playerObj;
       });
 
       transaction.update(roomRef, {
@@ -618,14 +647,21 @@ export async function resetRoomToPlayAgain(roomId: string) {
     if (!roomSnap.exists()) return;
     const room = roomSnap.data() as GameRoom;
 
-    const resetPlayers = room.players.map((p) => ({
-      ...p,
-      position: 1,
-      isReady: p.uid === room.hostId, // Host is ready
-      rank: undefined,
-      isConnected: true,
-      lastSeen: now,
-    }));
+    const resetPlayers = room.players.map((p) => {
+      const pObj: any = {
+        uid: p.uid,
+        playerId: p.playerId || `PL-${p.uid.substring(0, 6)}`,
+        displayName: p.displayName || 'ကစားသမား',
+        photoURL: p.photoURL || '',
+        position: 1,
+        color: p.color || '#3B82F6',
+        activeTokenSkin: p.activeTokenSkin || 'token_crown',
+        isReady: p.uid === room.hostId, // Host is ready
+        isConnected: true,
+        lastSeen: now,
+      };
+      return pObj;
+    });
 
     await updateDoc(roomRef, {
       players: resetPlayers,

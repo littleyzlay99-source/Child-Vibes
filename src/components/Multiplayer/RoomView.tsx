@@ -199,26 +199,28 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
   };
 
   // Roll Dice & Atomic Execution
-  const handleRollDice = async (diceRoll: number) => {
-    if (!currentUser || !isMyTurn || actionInProgress || room.status !== 'playing') return;
+  const handleRollDice = async (): Promise<number | undefined> => {
+    if (!currentUser || !isMyTurn || actionInProgress || room.status !== 'playing') return undefined;
     setActionInProgress(true);
     setMovingPlayerId(currentUser.uid);
     setGameErrorNotice(null);
 
     try {
-      const outcome = await executeDiceRollAndMove(roomId, currentUser.uid, diceRoll);
+      const outcome = await executeDiceRollAndMove(roomId, currentUser.uid);
       // Wait for token walk animation to complete before re-enabling
-      const animationTime = Math.max(1000, (outcome.movePath?.length || 1) * 250);
+      const animationTime = Math.max(1200, (outcome.movePath?.length || 1) * 250);
       setTimeout(() => {
         setMovingPlayerId(null);
         setActionInProgress(false);
       }, animationTime);
+      return outcome.diceRoll;
     } catch (error: any) {
       console.error('Move error:', error);
       setGameErrorNotice(error?.message || 'အံစာတုံးခေါက်ရာတွင် အဆင်မပြေဖြစ်သွားပါသည်။ ပြန်လည်ကြိုးစားပေးပါ။');
       setMovingPlayerId(null);
       setActionInProgress(false);
       setTimeout(() => setGameErrorNotice(null), 3500);
+      return undefined;
     }
   };
 

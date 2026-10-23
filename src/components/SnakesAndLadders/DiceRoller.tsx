@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { sounds } from '../../lib/sound';
 import { Dices, Sparkles, User, Clock, AlertTriangle } from 'lucide-react';
 import { RoomPlayer } from '../../types';
@@ -8,7 +8,7 @@ interface DiceRollerProps {
   currentTurnPlayer: RoomPlayer | undefined;
   lastDiceRoll: number;
   lastMoveSummary: string;
-  onRollDice: (rollResult: number) => Promise<void>;
+  onRollDice: () => Promise<number | undefined>;
   disabled: boolean;
   diceSkin?: string;
   turnDeadline?: number;
@@ -29,6 +29,16 @@ export const DiceRoller: React.FC<DiceRollerProps> = ({
   const [isRolling, setIsRolling] = useState(false);
   const [displayRoll, setDisplayRoll] = useState(lastDiceRoll || 1);
   const [secondsLeft, setSecondsLeft] = useState<number>(30);
+  const rollIntervalRef = useRef<any>(null);
+
+  // Clear interval on unmount
+  useEffect(() => {
+    return () => {
+      if (rollIntervalRef.current) {
+        clearInterval(rollIntervalRef.current);
+      }
+    };
+  }, []);
 
   // Synchronize 30-Second Countdown with server turnDeadline
   useEffect(() => {
@@ -55,7 +65,7 @@ export const DiceRoller: React.FC<DiceRollerProps> = ({
     return () => clearInterval(interval);
   }, [turnDeadline, isMyTurn, isRolling, disabled, onTimeout]);
 
-  // Keep display roll synced with lastDiceRoll from room state
+  // Keep display roll synced with lastDiceRoll from room state when not rolling
   useEffect(() => {
     if (lastDiceRoll && !isRolling) {
       setDisplayRoll(lastDiceRoll);
@@ -67,19 +77,42 @@ export const DiceRoller: React.FC<DiceRollerProps> = ({
     setIsRolling(true);
     sounds.playDiceRoll();
 
-    // Roll animation with rotating random numbers
-    let rollCount = 0;
-    const interval = setInterval(() => {
+    // Visual dice cycling animation
+    if (rollIntervalRef.current) clearInterval(rollIntervalRef.current);
+    rollIntervalRef.current = setInterval(() => {
       setDisplayRoll(Math.floor(Math.random() * 6) + 1);
-      rollCount++;
-      if (rollCount >= 8) {
-        clearInterval(interval);
-        const finalRoll = Math.floor(Math.random() * 6) + 1;
-        setDisplayRoll(finalRoll);
-        setIsRolling(false);
-        onRollDice(finalRoll);
+    }, 55);
+
+    const animStart = Date.now();
+    try {
+      // Execute authoritative roll via Firebase transaction
+      const confirmedRoll = await onRollDice();
+
+      // Ensure smooth tumbling visual for at least 600ms
+      const elapsed = Date.now() - animStart;
+      if (elapsed < 600) {
+        await new Promise((resolve) => setTimeout(resolve, 600 - elapsed));
       }
-    }, 60);
+
+      if (rollIntervalRef.current) {
+        clearInterval(rollIntervalRef.current);
+        rollIntervalRef.current = null;
+      }
+
+      if (typeof confirmedRoll === 'number' && confirmedRoll >= 1 && confirmedRoll <= 6) {
+        setDisplayRoll(confirmedRoll);
+      } else if (lastDiceRoll) {
+        setDisplayRoll(lastDiceRoll);
+      }
+    } catch (err) {
+      if (rollIntervalRef.current) {
+        clearInterval(rollIntervalRef.current);
+        rollIntervalRef.current = null;
+      }
+      setDisplayRoll(lastDiceRoll || 1);
+    } finally {
+      setIsRolling(false);
+    }
   };
 
   // Dice dot patterns

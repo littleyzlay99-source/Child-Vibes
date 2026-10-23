@@ -40,14 +40,19 @@ export const GameBoard: React.FC<GameBoardProps> = ({
 }) => {
   // Local animated positions map: { [playerUid]: currentAnimatedTile }
   const [animatedPositions, setAnimatedPositions] = useState<{ [uid: string]: number }>({});
-  const lastAnimatedTimestampRef = useRef<number>(0);
+  const lastProcessedTimestampRef = useRef<number>(0);
+  const animatingPlayerRef = useRef<string | null>(null);
+  const stepTimerRef = useRef<any>(null);
 
-  // Sync positions when players update or when starting
+  // Sync positions from server players whenever players prop updates,
+  // but preserve current position of any player actively animating
   useEffect(() => {
     setAnimatedPositions((prev) => {
       const next: { [uid: string]: number } = { ...prev };
       players.forEach((p) => {
-        if (next[p.uid] === undefined) {
+        if (animatingPlayerRef.current !== p.uid) {
+          next[p.uid] = p.position || 1;
+        } else if (next[p.uid] === undefined) {
           next[p.uid] = p.position || 1;
         }
       });
@@ -55,27 +60,49 @@ export const GameBoard: React.FC<GameBoardProps> = ({
     });
   }, [players]);
 
+  // Clean up timer on unmount
+  useEffect(() => {
+    return () => {
+      if (stepTimerRef.current) {
+        clearInterval(stepTimerRef.current);
+      }
+    };
+  }, []);
+
   // Step-by-step Tile Walking Animation
   useEffect(() => {
     if (
       lastMoveTimestamp &&
-      lastMoveTimestamp !== lastAnimatedTimestampRef.current &&
+      lastMoveTimestamp !== lastProcessedTimestampRef.current &&
       lastMovePath &&
       lastMovePath.length > 1 &&
       lastMovingPlayerUid
     ) {
-      lastAnimatedTimestampRef.current = lastMoveTimestamp;
+      // Don't replay ancient animations on initial load if older than 5 seconds
+      const now = Date.now();
+      if (lastProcessedTimestampRef.current === 0 && now - lastMoveTimestamp > 5000) {
+        lastProcessedTimestampRef.current = lastMoveTimestamp;
+        return;
+      }
+
+      lastProcessedTimestampRef.current = lastMoveTimestamp;
       const targetPlayerUid = lastMovingPlayerUid;
       const path = [...lastMovePath];
 
+      if (stepTimerRef.current) {
+        clearInterval(stepTimerRef.current);
+      }
+
+      animatingPlayerRef.current = targetPlayerUid;
       let currentIndex = 0;
+
       // Start at initial path tile
       setAnimatedPositions((prev) => ({
         ...prev,
         [targetPlayerUid]: path[0],
       }));
 
-      const stepInterval = setInterval(() => {
+      stepTimerRef.current = setInterval(() => {
         currentIndex++;
         if (currentIndex < path.length) {
           const nextTile = path[currentIndex];
@@ -84,7 +111,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({
             [targetPlayerUid]: nextTile,
           }));
 
-          // Play sound
+          // Play appropriate sound
           if (GAME_CONFIG.LADDERS[nextTile]) {
             sounds.playLadder();
           } else if (GAME_CONFIG.SNAKES[nextTile]) {
@@ -93,26 +120,16 @@ export const GameBoard: React.FC<GameBoardProps> = ({
             sounds.playStep();
           }
         } else {
-          clearInterval(stepInterval);
-          // Settle to final server player position
-          const finalPlayer = players.find((p) => p.uid === targetPlayerUid);
-          if (finalPlayer) {
-            setAnimatedPositions((prev) => ({
-              ...prev,
-              [targetPlayerUid]: finalPlayer.position,
-            }));
-          }
+          clearInterval(stepTimerRef.current);
+          stepTimerRef.current = null;
+          animatingPlayerRef.current = null;
+          const finalTile = path[path.length - 1];
+          setAnimatedPositions((prev) => ({
+            ...prev,
+            [targetPlayerUid]: finalTile,
+          }));
         }
-      }, 220); // 220ms per tile step for clear, satisfying motion
-
-      return () => clearInterval(stepInterval);
-    } else {
-      // If no active animation, keep all positions synced
-      const synced: { [uid: string]: number } = {};
-      players.forEach((p) => {
-        synced[p.uid] = p.position || 1;
-      });
-      setAnimatedPositions(synced);
+      }, 220); // 220ms per tile step for clear, smooth motion
     }
   }, [lastMoveTimestamp, lastMovePath, lastMovingPlayerUid]);
 
