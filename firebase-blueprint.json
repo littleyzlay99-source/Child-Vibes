@@ -1,0 +1,225 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile with game stats, points, level and customization inventory",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Firebase Auth UID"
+        },
+        "playerId": {
+          "type": "string",
+          "description": "Unique 6-8 digit player ID",
+          "maxLength": 16
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Display name of player",
+          "maxLength": 60
+        },
+        "email": {
+          "type": "string",
+          "description": "Google account email",
+          "maxLength": 120
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "Profile picture URL",
+          "maxLength": 1000
+        },
+        "level": {
+          "type": "number",
+          "description": "Current player level"
+        },
+        "xp": {
+          "type": "number",
+          "description": "Current experience points"
+        },
+        "points": {
+          "type": "number",
+          "description": "Gold points balance"
+        },
+        "totalWins": {
+          "type": "number",
+          "description": "Total mini games won"
+        },
+        "totalGames": {
+          "type": "number",
+          "description": "Total mini games played"
+        },
+        "activeFrame": {
+          "type": "string",
+          "description": "Currently equipped avatar frame item id",
+          "maxLength": 50
+        },
+        "activeBoardSkin": {
+          "type": "string",
+          "description": "Currently equipped board theme id",
+          "maxLength": 50
+        },
+        "activeDiceSkin": {
+          "type": "string",
+          "description": "Currently equipped dice skin id",
+          "maxLength": 50
+        },
+        "activeTokenSkin": {
+          "type": "string",
+          "description": "Currently equipped token style id",
+          "maxLength": 50
+        },
+        "inventory": {
+          "type": "array",
+          "description": "List of purchased item IDs"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp of creation"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of last update"
+        }
+      },
+      "required": ["id", "playerId", "displayName", "email", "level", "points"]
+    },
+    "GameRoom": {
+      "title": "GameRoom",
+      "description": "Real-time multiplayer game room and state",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Room Code ID",
+          "maxLength": 32
+        },
+        "roomCode": {
+          "type": "string",
+          "description": "Short 6 character room code",
+          "maxLength": 10
+        },
+        "gameType": {
+          "type": "string",
+          "description": "Identifier of the mini game",
+          "maxLength": 40
+        },
+        "hostId": {
+          "type": "string",
+          "description": "User ID of the room creator",
+          "maxLength": 128
+        },
+        "hostName": {
+          "type": "string",
+          "description": "Display name of host",
+          "maxLength": 60
+        },
+        "status": {
+          "type": "string",
+          "description": "Room status: waiting, playing, finished",
+          "enum": ["waiting", "playing", "finished"]
+        },
+        "maxPlayers": {
+          "type": "number",
+          "description": "Maximum players allowed"
+        },
+        "players": {
+          "type": "array",
+          "description": "Array of connected player objects"
+        },
+        "currentTurnIndex": {
+          "type": "number",
+          "description": "Index of player whose turn it is"
+        },
+        "lastDiceRoll": {
+          "type": "number",
+          "description": "Result of last dice roll 1-6"
+        },
+        "lastMoveSummary": {
+          "type": "string",
+          "description": "Burmese description of the last move event",
+          "maxLength": 300
+        },
+        "winnerId": {
+          "type": "string",
+          "description": "UID of the winner if game finished",
+          "maxLength": 128
+        },
+        "winnerName": {
+          "type": "string",
+          "description": "Name of the winner",
+          "maxLength": 60
+        },
+        "exactFinish": {
+          "type": "boolean",
+          "description": "Rule requirement: exact roll required to reach 100"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp of room creation"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of room update"
+        }
+      },
+      "required": ["id", "roomCode", "gameType", "hostId", "status", "maxPlayers", "players"]
+    },
+    "PointTransaction": {
+      "title": "PointTransaction",
+      "description": "Record of points earned or spent",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Transaction identifier",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "description": "User UID who owns the transaction",
+          "maxLength": 128
+        },
+        "type": {
+          "type": "string",
+          "description": "reward, win, shop_purchase, level_bonus",
+          "maxLength": 40
+        },
+        "amount": {
+          "type": "number",
+          "description": "Positive for credit, negative for debit"
+        },
+        "description": {
+          "type": "string",
+          "description": "Burmese transaction description",
+          "maxLength": 200
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp"
+        }
+      },
+      "required": ["id", "userId", "type", "amount", "description", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "User"
+      },
+      "description": "User profiles and player records"
+    },
+    "/rooms/{roomId}": {
+      "schema": {
+        "$ref": "GameRoom"
+      },
+      "description": "Live multiplayer game rooms and boards"
+    },
+    "/transactions/{transactionId}": {
+      "schema": {
+        "$ref": "PointTransaction"
+      },
+      "description": "Ledger of point rewards and shop purchases"
+    }
+  }
+}

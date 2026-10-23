@@ -1,0 +1,8 @@
+{
+  "name": "Shwe Games - မြန်မာ့အွန်လိုင်း မီနီဂိမ်း ပလက်ဖောင်း",
+  "description": "သူငယ်ချင်းများနှင့် အွန်လိုင်းမှတစ်ဆင့် မြွေနှင့်လှေကား အပါအဝင် မီနီဂိမ်းများ အတူကစားနိုင်သော မြန်မာပလက်ဖောင်း",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
