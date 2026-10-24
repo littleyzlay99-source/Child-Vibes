@@ -9,6 +9,8 @@ interface GameBoardProps {
   currentTurnIndex: number;
   boardSkin?: string;
   movingPlayerId?: string | null;
+  gameRound?: number;
+  lastMoveId?: string | null;
   lastMovePath?: number[];
   lastMoveTimestamp?: number;
   lastMovingPlayerUid?: string | null;
@@ -34,104 +36,228 @@ export const GameBoard: React.FC<GameBoardProps> = ({
   currentTurnIndex,
   boardSkin = 'board_classic',
   movingPlayerId,
+  gameRound = 1,
+  lastMoveId,
   lastMovePath,
   lastMoveTimestamp,
   lastMovingPlayerUid,
 }) => {
-  // Local animated positions map: { [playerUid]: currentAnimatedTile }
-  const [animatedPositions, setAnimatedPositions] = useState<{ [uid: string]: number }>({});
-  const lastProcessedTimestampRef = useRef<number>(0);
-  const animatingPlayerRef = useRef<string | null>(null);
-  const stepTimerRef = useRef<any>(null);
-
-  // Sync positions from server players whenever players prop updates,
-  // but preserve current position of any player actively animating
-  useEffect(() => {
-    setAnimatedPositions((prev) => {
-      const next: { [uid: string]: number } = { ...prev };
-      players.forEach((p) => {
-        if (animatingPlayerRef.current !== p.uid) {
-          next[p.uid] = p.position || 1;
-        } else if (next[p.uid] === undefined) {
-          next[p.uid] = p.position || 1;
-        }
-      });
-      return next;
+  // Local displayed positions map: { [playerUid]: currentDisplayedTile }
+  const [animatedPositions, setAnimatedPositions] = useState<{ [uid: string]: number }>(() => {
+    const initial: { [uid: string]: number } = {};
+    players.forEach((p) => {
+      initial[p.uid] = p.position || 1;
     });
-  }, [players]);
+    return initial;
+  });
 
-  // Clean up timer on unmount
+  const hasMountedRef = useRef<boolean>(false);
+  const currentRoundRef = useRef<number>(gameRound || 1);
+  const processedMoveKeysRef = useRef<Set<string>>(new Set());
+  const animatingPlayerRef = useRef<string | null>(null);
+  const stepTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Per-player highest confirmed { version, position } within the active gameRound
+  const confirmedPlayerPosRef = useRef<Record<string, { version: number; position: number }>>({});
+
+  // Clean up step interval on unmount
   useEffect(() => {
     return () => {
       if (stepTimerRef.current) {
         clearInterval(stepTimerRef.current);
+        stepTimerRef.current = null;
       }
+      animatingPlayerRef.current = null;
     };
   }, []);
 
-  // Step-by-step Tile Walking Animation
+  // Unified, deterministic synchronization & single-play step animation
   useEffect(() => {
-    if (
-      lastMoveTimestamp &&
-      lastMoveTimestamp !== lastProcessedTimestampRef.current &&
-      lastMovePath &&
-      lastMovePath.length > 1 &&
-      lastMovingPlayerUid
-    ) {
-      // Don't replay ancient animations on initial load if older than 5 seconds
-      const now = Date.now();
-      if (lastProcessedTimestampRef.current === 0 && now - lastMoveTimestamp > 5000) {
-        lastProcessedTimestampRef.current = lastMoveTimestamp;
-        return;
-      }
+    const round = gameRound || 1;
+    // Derive unique move key (preferring server lastMoveId, falling back to timestamp for legacy rooms)
+    const moveKey = lastMoveId
+      ? `id:${lastMoveId}`
+      : lastMoveTimestamp && lastMovingPlayerUid
+      ? `ts:${lastMovingPlayerUid}:${lastMoveTimestamp}`
+      : null;
 
-      lastProcessedTimestampRef.current = lastMoveTimestamp;
-      const targetPlayerUid = lastMovingPlayerUid;
-      const path = [...lastMovePath];
-
+    // 1. Handle new match reset (Play Again -> gameRound incremented)
+    if (round !== currentRoundRef.current) {
+      currentRoundRef.current = round;
       if (stepTimerRef.current) {
         clearInterval(stepTimerRef.current);
+        stepTimerRef.current = null;
       }
+      animatingPlayerRef.current = null;
+      processedMoveKeysRef.current.clear();
+      confirmedPlayerPosRef.current = {};
+      if (moveKey) {
+        processedMoveKeysRef.current.add(moveKey);
+      }
+
+      const resetMap: { [uid: string]: number } = {};
+      players.forEach((p) => {
+        const pos = p.position || 1;
+        resetMap[p.uid] = pos;
+        confirmedPlayerPosRef.current[p.uid] = {
+          version: p.positionVersion || 1,
+          position: pos,
+        };
+      });
+      setAnimatedPositions(resetMap);
+      return;
+    }
+
+    // 2. Initial mount / page refresh: settle directly to confirmed server positions
+    // and mark any pre-existing moveKey as already processed so refresh never replays old walks
+    if (!hasMountedRef.current) {
+      hasMountedRef.current = true;
+      if (moveKey) {
+        processedMoveKeysRef.current.add(moveKey);
+      }
+      const initMap: { [uid: string]: number } = {};
+      players.forEach((p) => {
+        const pos = p.position || 1;
+        initMap[p.uid] = pos;
+        confirmedPlayerPosRef.current[p.uid] = {
+          version: p.positionVersion || 1,
+          position: pos,
+        };
+      });
+      setAnimatedPositions(initMap);
+      return;
+    }
+
+    // 3. Check if a brand-new, unprocessed move just arrived
+    const isNewUnprocessedMove =
+      !!moveKey &&
+      !processedMoveKeysRef.current.has(moveKey) &&
+      !!lastMovingPlayerUid &&
+      Array.isArray(lastMovePath) &&
+      lastMovePath.length > 1;
+
+    if (isNewUnprocessedMove && moveKey && lastMovingPlayerUid && lastMovePath) {
+      processedMoveKeysRef.current.add(moveKey);
+
+      // If another player's animation was still finishing, settle them immediately to their confirmed tile
+      const prevAnimatingUid = animatingPlayerRef.current;
+      if (stepTimerRef.current) {
+        clearInterval(stepTimerRef.current);
+        stepTimerRef.current = null;
+      }
+
+      const targetPlayerUid = lastMovingPlayerUid;
+      const path = [...lastMovePath];
+      const finalPathTile = path[path.length - 1];
+      const movingPlayerObj = players.find((p) => p.uid === targetPlayerUid);
+      const confirmedFinalPos = movingPlayerObj?.position ?? finalPathTile;
+      const confirmedFinalVer = Math.max(
+        movingPlayerObj?.positionVersion ?? 1,
+        confirmedPlayerPosRef.current[targetPlayerUid]?.version ?? 0
+      );
+
+      confirmedPlayerPosRef.current[targetPlayerUid] = {
+        version: confirmedFinalVer,
+        position: confirmedFinalPos,
+      };
 
       animatingPlayerRef.current = targetPlayerUid;
       let currentIndex = 0;
 
-      // Start at initial path tile
-      setAnimatedPositions((prev) => ({
-        ...prev,
-        [targetPlayerUid]: path[0],
-      }));
+      // Sync non-moving players strictly to their highest confirmed positions
+      // and place the moving player at path[0] to start walking
+      setAnimatedPositions((prev) => {
+        const next: { [uid: string]: number } = { ...prev };
+        players.forEach((p) => {
+          if (p.uid !== targetPlayerUid) {
+            const known = confirmedPlayerPosRef.current[p.uid];
+            const pVer = p.positionVersion ?? 1;
+            const pPos = p.position || 1;
+            if (!known || pVer >= known.version) {
+              confirmedPlayerPosRef.current[p.uid] = { version: pVer, position: pPos };
+              next[p.uid] = pPos;
+            } else {
+              next[p.uid] = known.position;
+            }
+          }
+        });
+        if (
+          prevAnimatingUid &&
+          prevAnimatingUid !== targetPlayerUid &&
+          confirmedPlayerPosRef.current[prevAnimatingUid]
+        ) {
+          next[prevAnimatingUid] = confirmedPlayerPosRef.current[prevAnimatingUid].position;
+        }
+        next[targetPlayerUid] = path[0];
+        return next;
+      });
 
       stepTimerRef.current = setInterval(() => {
         currentIndex++;
         if (currentIndex < path.length) {
+          const prevTile = path[currentIndex - 1];
           const nextTile = path[currentIndex];
           setAnimatedPositions((prev) => ({
             ...prev,
             [targetPlayerUid]: nextTile,
           }));
 
-          // Play appropriate sound
-          if (GAME_CONFIG.LADDERS[nextTile]) {
+          // Play ladder/snake sound only when actually traversing a ladder or snake
+          if (GAME_CONFIG.LADDERS[prevTile] === nextTile) {
             sounds.playLadder();
-          } else if (GAME_CONFIG.SNAKES[nextTile]) {
+          } else if (GAME_CONFIG.SNAKES[prevTile] === nextTile) {
             sounds.playSnake();
           } else {
             sounds.playStep();
           }
         } else {
-          clearInterval(stepTimerRef.current);
-          stepTimerRef.current = null;
+          if (stepTimerRef.current) {
+            clearInterval(stepTimerRef.current);
+            stepTimerRef.current = null;
+          }
           animatingPlayerRef.current = null;
-          const finalTile = path[path.length - 1];
+          const settledPos =
+            confirmedPlayerPosRef.current[targetPlayerUid]?.position ?? confirmedFinalPos;
           setAnimatedPositions((prev) => ({
             ...prev,
-            [targetPlayerUid]: finalTile,
+            [targetPlayerUid]: settledPos,
           }));
         }
-      }, 220); // 220ms per tile step for clear, smooth motion
+      }, 220);
+
+      return;
     }
-  }, [lastMoveTimestamp, lastMovePath, lastMovingPlayerUid]);
+
+    // 4. Snapshot / re-render without a new move:
+    // Update non-animating players ONLY when incoming positionVersion >= known version.
+    // Never rollback to an older position, and never interrupt an ongoing walk animation.
+    setAnimatedPositions((prev) => {
+      let hasAnyChange = false;
+      const next: { [uid: string]: number } = { ...prev };
+
+      players.forEach((p) => {
+        const known = confirmedPlayerPosRef.current[p.uid];
+        const pVer = p.positionVersion ?? 1;
+        const pPos = p.position || 1;
+
+        if (!known || pVer >= known.version) {
+          confirmedPlayerPosRef.current[p.uid] = {
+            version: pVer,
+            position: pPos,
+          };
+        }
+
+        if (animatingPlayerRef.current !== p.uid) {
+          const authoritativePos = confirmedPlayerPosRef.current[p.uid]?.position ?? pPos;
+          if (next[p.uid] !== authoritativePos) {
+            next[p.uid] = authoritativePos;
+            hasAnyChange = true;
+          }
+        }
+      });
+
+      return hasAnyChange ? next : prev;
+    });
+  }, [players, gameRound, lastMoveId, lastMoveTimestamp, lastMovePath, lastMovingPlayerUid]);
 
   // Pre-generate grid tiles 100 down to 1 (top to bottom)
   const tiles = useMemo(() => {

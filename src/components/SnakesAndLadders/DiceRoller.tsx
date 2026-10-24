@@ -29,7 +29,14 @@ export const DiceRoller: React.FC<DiceRollerProps> = ({
   const [isRolling, setIsRolling] = useState(false);
   const [displayRoll, setDisplayRoll] = useState(lastDiceRoll || 1);
   const [secondsLeft, setSecondsLeft] = useState<number>(30);
-  const rollIntervalRef = useRef<any>(null);
+  const rollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const rollLockRef = useRef<boolean>(false);
+  const onTimeoutRef = useRef(onTimeout);
+  const lastTimedOutDeadlineRef = useRef<number>(0);
+
+  useEffect(() => {
+    onTimeoutRef.current = onTimeout;
+  }, [onTimeout]);
 
   // Clear interval on unmount
   useEffect(() => {
@@ -53,9 +60,21 @@ export const DiceRoller: React.FC<DiceRollerProps> = ({
       const secs = Math.max(0, Math.ceil(diffMs / 1000));
       setSecondsLeft(secs);
 
-      if (secs <= 0 && isMyTurn && !isRolling && !disabled) {
-        if (onTimeout) {
-          onTimeout();
+      // Fire timeout once per turnDeadline (immediately on active player's client,
+      // or after a 2s fallback grace on other clients if active player's tab is frozen)
+      const shouldTrigger =
+        (secs <= 0 && isMyTurn) || (diffMs <= -2000 && !isMyTurn);
+
+      if (
+        shouldTrigger &&
+        !rollLockRef.current &&
+        !isRolling &&
+        !disabled &&
+        lastTimedOutDeadlineRef.current !== turnDeadline
+      ) {
+        lastTimedOutDeadlineRef.current = turnDeadline;
+        if (onTimeoutRef.current) {
+          onTimeoutRef.current();
         }
       }
     };
@@ -63,7 +82,7 @@ export const DiceRoller: React.FC<DiceRollerProps> = ({
     updateTimer();
     const interval = setInterval(updateTimer, 500);
     return () => clearInterval(interval);
-  }, [turnDeadline, isMyTurn, isRolling, disabled, onTimeout]);
+  }, [turnDeadline, isMyTurn, isRolling, disabled]);
 
   // Keep display roll synced with lastDiceRoll from room state when not rolling
   useEffect(() => {
@@ -73,7 +92,8 @@ export const DiceRoller: React.FC<DiceRollerProps> = ({
   }, [lastDiceRoll, isRolling]);
 
   const handleRollClick = async () => {
-    if (!isMyTurn || isRolling || disabled) return;
+    if (!isMyTurn || isRolling || rollLockRef.current || disabled) return;
+    rollLockRef.current = true;
     setIsRolling(true);
     sounds.playDiceRoll();
 
@@ -104,7 +124,7 @@ export const DiceRoller: React.FC<DiceRollerProps> = ({
       } else if (lastDiceRoll) {
         setDisplayRoll(lastDiceRoll);
       }
-    } catch (err) {
+    } catch {
       if (rollIntervalRef.current) {
         clearInterval(rollIntervalRef.current);
         rollIntervalRef.current = null;
@@ -112,6 +132,7 @@ export const DiceRoller: React.FC<DiceRollerProps> = ({
       setDisplayRoll(lastDiceRoll || 1);
     } finally {
       setIsRolling(false);
+      rollLockRef.current = false;
     }
   };
 

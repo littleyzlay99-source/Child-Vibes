@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
-import { GameRoom } from '../../types';
+import { GameRoom, RoomPlayer } from '../../types';
 import { useAuth } from '../../contexts/AuthContext';
 import {
   togglePlayerReady,
@@ -40,6 +40,13 @@ interface RoomViewProps {
   onExitRoom: () => void;
 }
 
+interface ConfirmedPlayerState {
+  position: number;
+  positionVersion: number;
+  lastMoveId: string | null;
+  updatedAtMs: number;
+}
+
 export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
   const { currentUser, userProfile, recordGameOutcome } = useAuth();
   const [room, setRoom] = useState<GameRoom | null>(null);
@@ -51,6 +58,29 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
   const [gameErrorNotice, setGameErrorNotice] = useState<string | null>(null);
   const [reconnectCountdown, setReconnectCountdown] = useState<number>(60);
 
+  const actionLockRef = useRef<boolean>(false);
+  const onExitRoomRef = useRef(onExitRoom);
+  const currentUidRef = useRef<string | undefined>(currentUser?.uid);
+
+  // Authoritative version tracker across snapshots to reject stale/out-of-order positions
+  const confirmedStateRef = useRef<{
+    gameRound: number;
+    stateVersion: number;
+    players: Record<string, ConfirmedPlayerState>;
+  }>({
+    gameRound: 0,
+    stateVersion: 0,
+    players: {},
+  });
+
+  useEffect(() => {
+    onExitRoomRef.current = onExitRoom;
+  }, [onExitRoom]);
+
+  useEffect(() => {
+    currentUidRef.current = currentUser?.uid;
+  }, [currentUser?.uid]);
+
   // Rewards state for end-game modal
   const [rewardOutcome, setRewardOutcome] = useState<{
     pointsEarned: number;
@@ -59,49 +89,160 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
     newLevel: number;
   } | null>(null);
 
-  // Subscribe to real-time room updates
+  // Single stable real-time room listener per roomId with strict version reconciliation
   useEffect(() => {
+    let isSubscribed = true;
+    confirmedStateRef.current = {
+      gameRound: 0,
+      stateVersion: 0,
+      players: {},
+    };
+
     const roomRef = doc(db, 'rooms', roomId);
     const unsubscribe = onSnapshot(
       roomRef,
       (snapshot) => {
-        if (snapshot.exists()) {
-          const roomData = snapshot.data() as GameRoom;
-          setRoom(roomData);
-        } else {
+        if (!isSubscribed) return;
+
+        if (!snapshot.exists()) {
           // Room deleted or closed
-          onExitRoom();
+          onExitRoomRef.current();
+          setLoading(false);
+          return;
         }
+
+        const rawRoom = snapshot.data() as GameRoom;
+
+        // If user restored roomId from sessionStorage but is no longer a member, exit cleanly
+        const myUid = currentUidRef.current;
+        if (myUid && Array.isArray(rawRoom.players) && !rawRoom.players.some((p) => p.uid === myUid)) {
+          onExitRoomRef.current();
+          setLoading(false);
+          return;
+        }
+
+        setRoom((prevRoom) => {
+          const tracker = confirmedStateRef.current;
+          const incomingRound = rawRoom.gameRound || 1;
+
+          // Reject snapshots belonging to an older match round
+          if (tracker.gameRound > 0 && incomingRound < tracker.gameRound) {
+            return prevRoom;
+          }
+
+          // New match round started (initial load or Play Again reset)
+          if (incomingRound > tracker.gameRound) {
+            tracker.gameRound = incomingRound;
+            tracker.stateVersion = rawRoom.stateVersion || 1;
+            tracker.players = {};
+          }
+
+          // Reconcile each player's position strictly by highest positionVersion
+          const reconciledPlayers: RoomPlayer[] = (rawRoom.players || []).map((p) => {
+            const mapRec = rawRoom.playerPositions?.[p.uid];
+            const pVer = typeof p.positionVersion === 'number' && p.positionVersion >= 1 ? p.positionVersion : 1;
+            const mapVer = typeof mapRec?.positionVersion === 'number' ? mapRec.positionVersion : 0;
+
+            const incomingVer = Math.max(pVer, mapVer);
+            const incomingPos =
+              mapRec && mapVer > pVer ? mapRec.position : (p.position || 1);
+            const incomingMoveId =
+              mapRec && mapVer > pVer ? mapRec.lastMoveId : (p.lastMoveId ?? null);
+            const incomingUpdatedAtMs =
+              mapRec && mapVer > pVer ? mapRec.updatedAtMs : (p.updatedAtMs ?? 0);
+
+            const known = tracker.players[p.uid];
+            let finalPos = incomingPos;
+            let finalVer = incomingVer;
+            let finalMoveId = incomingMoveId;
+            let finalUpdatedAtMs = incomingUpdatedAtMs;
+
+            if (known && incomingVer < known.positionVersion) {
+              // Reject stale/lower positionVersion; keep confirmed higher version!
+              finalPos = known.position;
+              finalVer = known.positionVersion;
+              finalMoveId = known.lastMoveId;
+              finalUpdatedAtMs = known.updatedAtMs;
+            } else {
+              tracker.players[p.uid] = {
+                position: incomingPos,
+                positionVersion: incomingVer,
+                lastMoveId: incomingMoveId,
+                updatedAtMs: incomingUpdatedAtMs,
+              };
+            }
+
+            // Merge isolated presence status without affecting position
+            const presenceEntry = rawRoom.presence?.[p.uid];
+            const isConnected = presenceEntry
+              ? presenceEntry.isConnected !== false
+              : p.isConnected !== false;
+            const lastSeen = presenceEntry?.lastSeen ?? p.lastSeen;
+
+            return {
+              ...p,
+              position: finalPos,
+              positionVersion: finalVer,
+              lastMoveId: finalMoveId,
+              updatedAtMs: finalUpdatedAtMs,
+              isConnected,
+              lastSeen,
+            };
+          });
+
+          const incomingStateVer = rawRoom.stateVersion || 1;
+          if (prevRoom && incomingStateVer < tracker.stateVersion) {
+            // Stale room-level snapshot: preserve confirmed turn/move state, update presence only
+            return {
+              ...prevRoom,
+              players: reconciledPlayers,
+              presence: rawRoom.presence ?? prevRoom.presence,
+            };
+          }
+
+          tracker.stateVersion = incomingStateVer;
+          return {
+            ...rawRoom,
+            players: reconciledPlayers,
+          };
+        });
+
         setLoading(false);
       },
       (error) => {
         console.error('Room listener error:', error);
-        setLoading(false);
+        if (isSubscribed) {
+          setLoading(false);
+        }
       }
     );
 
-    return () => unsubscribe();
-  }, [roomId, onExitRoom]);
+    return () => {
+      isSubscribed = false;
+      unsubscribe();
+    };
+  }, [roomId]);
 
-  // Player Presence & Heartbeat (every 6 seconds) + Reconnection check
+  // Isolated Player Presence & Heartbeat (every 12 seconds) + Reconnection check
   useEffect(() => {
-    if (!currentUser || !roomId) return;
+    const uid = currentUser?.uid;
+    if (!uid || !roomId) return;
 
     // Initial reconnect check
-    reconnectPlayerToRoom(roomId, currentUser.uid);
+    reconnectPlayerToRoom(roomId, uid);
 
     const heartbeatInterval = setInterval(() => {
       if (navigator.onLine) {
-        updatePlayerPresence(roomId, currentUser.uid);
+        updatePlayerPresence(roomId, uid);
       }
-    }, 6000);
+    }, 12000);
 
     const handleOnline = () => {
-      reconnectPlayerToRoom(roomId, currentUser.uid);
+      reconnectPlayerToRoom(roomId, uid);
     };
 
     const handleOffline = () => {
-      markPlayerDisconnected(roomId, currentUser.uid);
+      markPlayerDisconnected(roomId, uid);
     };
 
     window.addEventListener('online', handleOnline);
@@ -112,7 +253,7 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [roomId, currentUser]);
+  }, [roomId, currentUser?.uid]);
 
   // Monitor Reconnection Deadline (60 Seconds)
   useEffect(() => {
@@ -198,27 +339,106 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
     onExitRoom();
   };
 
-  // Roll Dice & Atomic Execution
+  // Roll Dice & Atomic Execution with immediate local version registration
   const handleRollDice = async (): Promise<number | undefined> => {
-    if (!currentUser || !isMyTurn || actionInProgress || room.status !== 'playing') return undefined;
+    if (
+      !currentUser ||
+      !isMyTurn ||
+      actionInProgress ||
+      actionLockRef.current ||
+      room.status !== 'playing'
+    ) {
+      return undefined;
+    }
+
+    actionLockRef.current = true;
     setActionInProgress(true);
     setMovingPlayerId(currentUser.uid);
     setGameErrorNotice(null);
 
     try {
       const outcome = await executeDiceRollAndMove(roomId, currentUser.uid);
+
+      // Atomically synchronize confirmedStateRef + React room state so even if an unrelated
+      // snapshot arrives before the move snapshot, there is zero flicker or position rollback
+      setRoom((prevRoom) => {
+        const tracker = confirmedStateRef.current;
+        const nowMs = Date.now();
+        const existingVer = tracker.players[currentUser.uid]?.positionVersion ?? 0;
+
+        if (outcome.positionVersion >= existingVer) {
+          tracker.players[currentUser.uid] = {
+            position: outcome.newPos,
+            positionVersion: outcome.positionVersion,
+            lastMoveId: outcome.moveId,
+            updatedAtMs: nowMs,
+          };
+        }
+
+        if (!prevRoom || (prevRoom.stateVersion || 0) >= outcome.stateVersion) {
+          return prevRoom;
+        }
+
+        tracker.stateVersion = outcome.stateVersion;
+        const updatedPlayers = prevRoom.players.map((p) =>
+          p.uid === currentUser.uid
+            ? {
+                ...p,
+                position: outcome.newPos,
+                positionVersion: outcome.positionVersion,
+                lastMoveId: outcome.moveId,
+                updatedAtMs: nowMs,
+                rank: outcome.won ? 1 : p.rank,
+              }
+            : p
+        );
+
+        return {
+          ...prevRoom,
+          players: updatedPlayers,
+          playerPositions: {
+            ...(prevRoom.playerPositions || {}),
+            [currentUser.uid]: {
+              position: outcome.newPos,
+              positionVersion: outcome.positionVersion,
+              lastMoveId: outcome.moveId,
+              updatedAtMs: nowMs,
+            },
+          },
+          lastDiceRoll: outcome.diceRoll,
+          lastMoveSummary: outcome.eventSummary,
+          lastMoveId: outcome.moveId,
+          lastMoveTimestamp: outcome.turnStartTimestamp,
+          lastMovePath: outcome.movePath,
+          lastMovingPlayerUid: currentUser.uid,
+          currentTurnIndex: outcome.nextTurnIndex,
+          turnStartTimestamp: outcome.turnStartTimestamp,
+          turnDeadline: outcome.turnDeadline,
+          stateVersion: outcome.stateVersion,
+          status: outcome.won ? 'finished' : prevRoom.status,
+          winnerId: outcome.won ? currentUser.uid : prevRoom.winnerId,
+          winnerName: outcome.won
+            ? userProfile?.displayName || prevRoom.winnerName
+            : prevRoom.winnerName,
+        };
+      });
+
       // Wait for token walk animation to complete before re-enabling
       const animationTime = Math.max(1200, (outcome.movePath?.length || 1) * 250);
       setTimeout(() => {
         setMovingPlayerId(null);
         setActionInProgress(false);
+        actionLockRef.current = false;
       }, animationTime);
       return outcome.diceRoll;
     } catch (error: any) {
       console.error('Move error:', error);
-      setGameErrorNotice(error?.message || 'အံစာတုံးခေါက်ရာတွင် အဆင်မပြေဖြစ်သွားပါသည်။ ပြန်လည်ကြိုးစားပေးပါ။');
+      setGameErrorNotice(
+        error?.message || 'အံစာတုံးခေါက်ရာတွင် အဆင်မပြေဖြစ်သွားပါသည်။ ပြန်လည်ကြိုးစားပေးပါ။'
+      );
       setMovingPlayerId(null);
       setActionInProgress(false);
+      actionLockRef.current = false;
       setTimeout(() => setGameErrorNotice(null), 3500);
       return undefined;
     }
@@ -509,12 +729,14 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
         </button>
       </div>
 
-      {/* Main Board View with Step Animation */}
+      {/* Main Board View with Version-Protected Step Animation */}
       <GameBoard
         players={room.players}
         currentTurnIndex={room.currentTurnIndex}
         boardSkin={userProfile?.activeBoardSkin || 'board_classic'}
         movingPlayerId={movingPlayerId}
+        gameRound={room.gameRound || 1}
+        lastMoveId={room.lastMoveId}
         lastMovePath={room.lastMovePath}
         lastMoveTimestamp={room.lastMoveTimestamp}
         lastMovingPlayerUid={room.lastMovingPlayerUid}

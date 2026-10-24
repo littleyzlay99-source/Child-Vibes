@@ -184,7 +184,29 @@
         },
         "lastMovingPlayerUid": {
           "type": "string",
-          "description": "UID of player who made the last move"
+          "description": "UID of player who made the last move",
+          "maxLength": 128
+        },
+        "stateVersion": {
+          "type": "number",
+          "description": "Monotonic room state version counter"
+        },
+        "gameRound": {
+          "type": "number",
+          "description": "Monotonic match round counter incremented on reset"
+        },
+        "lastMoveId": {
+          "type": "string",
+          "description": "Unique identifier for the latest dice move",
+          "maxLength": 80
+        },
+        "playerPositions": {
+          "type": "object",
+          "description": "Per-player authoritative position and positionVersion map"
+        },
+        "presence": {
+          "type": "object",
+          "description": "Isolated per-player connection presence and heartbeat timestamps"
         },
         "createdAt": {
           "type": "string",
@@ -193,6 +215,11 @@
         "updatedAt": {
           "type": "string",
           "description": "ISO timestamp of room update"
+        },
+        "serverUpdatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Authoritative Firestore serverTimestamp"
         }
       },
       "required": ["id", "roomCode", "gameType", "hostId", "status", "maxPlayers", "players"]

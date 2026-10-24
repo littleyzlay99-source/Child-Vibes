@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { LoginScreen } from './components/Auth/LoginScreen';
 import { Navbar } from './components/Navigation/Navbar';
@@ -15,10 +15,36 @@ import { ShopView } from './components/Shop/ShopView';
 import { ProfileView } from './components/Profile/ProfileView';
 import { joinGameRoomByCode } from './services/roomService';
 
+const ACTIVE_ROOM_STORAGE_KEY = 'child_vibes_active_room_id';
+
 function MainApp() {
   const { currentUser, userProfile, loading } = useAuth();
   const [currentTab, setCurrentTab] = useState<string>('home');
-  const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
+  const [activeRoomId, setActiveRoomIdState] = useState<string | null>(() => {
+    try {
+      return sessionStorage.getItem(ACTIVE_ROOM_STORAGE_KEY) || null;
+    } catch {
+      return null;
+    }
+  });
+
+  const setActiveRoomId = useCallback((roomId: string | null) => {
+    setActiveRoomIdState(roomId);
+    try {
+      if (roomId) {
+        sessionStorage.setItem(ACTIVE_ROOM_STORAGE_KEY, roomId);
+      } else {
+        sessionStorage.removeItem(ACTIVE_ROOM_STORAGE_KEY);
+      }
+    } catch {
+      // Ignore storage errors in restricted contexts
+    }
+  }, []);
+
+  const handleExitRoom = useCallback(() => {
+    setActiveRoomId(null);
+    setCurrentTab('rooms');
+  }, [setActiveRoomId]);
 
   // Check URL query parameters for room invitation links e.g. ?room=SG8K29
   useEffect(() => {
@@ -37,7 +63,7 @@ function MainApp() {
           });
       }
     }
-  }, [userProfile, activeRoomId]);
+  }, [userProfile, activeRoomId, setActiveRoomId]);
 
   if (loading) {
     return (
@@ -61,19 +87,14 @@ function MainApp() {
         <Navbar
           currentTab="rooms"
           onSelectTab={(tab) => {
-            if (window.confirm('ဂိမ်းအခန်းမှ ထွက်ခွာလိုပါသလား?')) {
-              setActiveRoomId(null);
-              setCurrentTab(tab);
-            }
+            setActiveRoomId(null);
+            setCurrentTab(tab);
           }}
         />
         <main className="container mx-auto py-4">
           <RoomView
             roomId={activeRoomId}
-            onExitRoom={() => {
-              setActiveRoomId(null);
-              setCurrentTab('rooms');
-            }}
+            onExitRoom={handleExitRoom}
           />
         </main>
       </div>

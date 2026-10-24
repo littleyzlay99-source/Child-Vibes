@@ -40,6 +40,19 @@ export interface ShopItem {
   gradient?: string;
 }
 
+export interface PlayerPresenceEntry {
+  isConnected: boolean;
+  lastSeen: number;
+  disconnectedAt?: number | null;
+}
+
+export interface PlayerPositionRecord {
+  position: number;
+  positionVersion: number;
+  lastMoveId: string | null;
+  updatedAtMs: number;
+}
+
 export interface RoomPlayer {
   uid: string;
   playerId: string;
@@ -48,6 +61,9 @@ export interface RoomPlayer {
   isReady: boolean;
   color: string;
   position: number; // 1 to 100
+  positionVersion?: number; // Monotonically increasing version per move
+  lastMoveId?: string | null; // Unique ID of this player's last move
+  updatedAtMs?: number; // Monotonic client/tx timestamp of last position update
   rank?: number;
   activeTokenSkin?: string;
   isConnected: boolean; // Internet connection status
@@ -70,6 +86,12 @@ export interface GameRoom {
   winnerId: string | null;
   winnerName: string | null;
   exactFinish: boolean;
+  // Version Control & Atomic Synchronization
+  stateVersion?: number; // Monotonically incremented on every authoritative state write
+  gameRound?: number; // Incremented on Play Again reset
+  lastMoveId?: string | null; // Unique ID for each dice roll move (prevents duplicate animation)
+  playerPositions?: Record<string, PlayerPositionRecord>; // Per-player authoritative position map
+  presence?: Record<string, PlayerPresenceEntry>; // Isolated presence map (never touches positions)
   // Timer & Realtime Turn Management
   turnStartTimestamp: number; // Timestamp ms when turn began
   turnDeadline: number; // Timestamp ms (turnStartTimestamp + 30000)
@@ -81,6 +103,7 @@ export interface GameRoom {
   lastMovingPlayerUid?: string | null;
   createdAt: string;
   updatedAt: string;
+  serverUpdatedAt?: unknown; // Firestore serverTimestamp()
 }
 
 export interface PointTransaction {
