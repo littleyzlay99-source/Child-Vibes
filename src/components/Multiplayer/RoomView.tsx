@@ -14,6 +14,8 @@ import {
   markPlayerDisconnected,
   reconnectPlayerToRoom,
   handleReconnectionTimeout,
+  deduplicateRoomPlayers,
+  normalizeMaxPlayers,
 } from '../../services/roomService';
 import { GameBoard } from '../SnakesAndLadders/GameBoard';
 import { DiceRoller } from '../SnakesAndLadders/DiceRoller';
@@ -37,6 +39,7 @@ import {
 
 interface RoomViewProps {
   roomId: string;
+  initialRoom?: GameRoom | null;
   onExitRoom: () => void;
 }
 
@@ -47,10 +50,11 @@ interface ConfirmedPlayerState {
   updatedAtMs: number;
 }
 
-export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
+export const RoomView: React.FC<RoomViewProps> = ({ roomId, initialRoom, onExitRoom }) => {
   const { currentUser, userProfile, recordGameOutcome } = useAuth();
-  const [room, setRoom] = useState<GameRoom | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
+  const seededRoom = initialRoom && initialRoom.id === roomId ? initialRoom : null;
+  const [room, setRoom] = useState<GameRoom | null>(seededRoom);
+  const [loading, setLoading] = useState<boolean>(!seededRoom);
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
   const [movingPlayerId, setMovingPlayerId] = useState<string | null>(null);
@@ -92,10 +96,27 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
   // Single stable real-time room listener per roomId with strict version reconciliation
   useEffect(() => {
     let isSubscribed = true;
+
+    // Seed version tracker from authoritative post-join/post-create initialRoom if available
+    const seed = initialRoom && initialRoom.id === roomId ? initialRoom : null;
+    const seededPlayersMap: Record<string, ConfirmedPlayerState> = {};
+    if (seed) {
+      for (const p of deduplicateRoomPlayers(seed.players, seed.playerPositions)) {
+        seededPlayersMap[p.uid] = {
+          position: p.position || 1,
+          positionVersion: p.positionVersion || 1,
+          lastMoveId: p.lastMoveId ?? null,
+          updatedAtMs: p.updatedAtMs ?? 0,
+        };
+      }
+      setRoom(seed);
+      setLoading(false);
+    }
+
     confirmedStateRef.current = {
-      gameRound: 0,
-      stateVersion: 0,
-      players: {},
+      gameRound: seed?.gameRound || 0,
+      stateVersion: seed?.stateVersion || 0,
+      players: seededPlayersMap,
     };
 
     const roomRef = doc(db, 'rooms', roomId);
@@ -105,17 +126,33 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
         if (!isSubscribed) return;
 
         if (!snapshot.exists()) {
-          // Room deleted or closed
-          onExitRoomRef.current();
-          setLoading(false);
+          // Only exit when confirmed by server (never exit on an unpopulated local cache miss)
+          if (!snapshot.metadata.fromCache) {
+            onExitRoomRef.current();
+            setLoading(false);
+          }
           return;
         }
 
         const rawRoom = snapshot.data() as GameRoom;
-
-        // If user restored roomId from sessionStorage but is no longer a member, exit cleanly
+        const incomingStateVer = rawRoom.stateVersion || 1;
+        const uniqueRawPlayers = deduplicateRoomPlayers(rawRoom.players, rawRoom.playerPositions);
         const myUid = currentUidRef.current;
-        if (myUid && Array.isArray(rawRoom.players) && !rawRoom.players.some((p) => p.uid === myUid)) {
+
+        // Ignore stale cached pre-join snapshots where the newly joined player isn't listed yet!
+        if (
+          myUid &&
+          !uniqueRawPlayers.some((p) => p.uid === myUid)
+        ) {
+          if (
+            snapshot.metadata.fromCache ||
+            incomingStateVer < confirmedStateRef.current.stateVersion
+          ) {
+            // Stale pre-join local cache snapshot — ignore completely so we never kick Player B out!
+            return;
+          }
+
+          // Server-confirmed snapshot shows user is genuinely no longer a member (e.g. left on another tab)
           onExitRoomRef.current();
           setLoading(false);
           return;
@@ -124,6 +161,7 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
         setRoom((prevRoom) => {
           const tracker = confirmedStateRef.current;
           const incomingRound = rawRoom.gameRound || 1;
+          const maxPlayers = normalizeMaxPlayers(rawRoom.maxPlayers);
 
           // Reject snapshots belonging to an older match round
           if (tracker.gameRound > 0 && incomingRound < tracker.gameRound) {
@@ -133,12 +171,12 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
           // New match round started (initial load or Play Again reset)
           if (incomingRound > tracker.gameRound) {
             tracker.gameRound = incomingRound;
-            tracker.stateVersion = rawRoom.stateVersion || 1;
+            tracker.stateVersion = incomingStateVer;
             tracker.players = {};
           }
 
-          // Reconcile each player's position strictly by highest positionVersion
-          const reconciledPlayers: RoomPlayer[] = (rawRoom.players || []).map((p) => {
+          // Reconcile each unique player's position strictly by highest positionVersion
+          const reconciledPlayers: RoomPlayer[] = uniqueRawPlayers.map((p) => {
             const mapRec = rawRoom.playerPositions?.[p.uid];
             const pVer = typeof p.positionVersion === 'number' && p.positionVersion >= 1 ? p.positionVersion : 1;
             const mapVer = typeof mapRec?.positionVersion === 'number' ? mapRec.positionVersion : 0;
@@ -190,12 +228,10 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
             };
           });
 
-          const incomingStateVer = rawRoom.stateVersion || 1;
           if (prevRoom && incomingStateVer < tracker.stateVersion) {
-            // Stale room-level snapshot: preserve confirmed turn/move state, update presence only
+            // Stale room-level snapshot: preserve confirmed turn/move/player list state
             return {
               ...prevRoom,
-              players: reconciledPlayers,
               presence: rawRoom.presence ?? prevRoom.presence,
             };
           }
@@ -203,6 +239,8 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
           tracker.stateVersion = incomingStateVer;
           return {
             ...rawRoom,
+            maxPlayers,
+            playerCount: reconciledPlayers.length,
             players: reconciledPlayers,
           };
         });
@@ -460,18 +498,31 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
     await resetRoomToPlayAgain(roomId);
   };
 
-  // 1. WAITING ROOM LOBBY STATE
-  if (room.status === 'waiting') {
+  // 1. WAITING / FULL LOBBY STATE (Before Host clicks Start Game)
+  if (room.status === 'waiting' || room.status === 'full') {
+    const lobbyMaxPlayers = normalizeMaxPlayers(room.maxPlayers);
+    const emptySlotCount = Math.max(0, lobbyMaxPlayers - room.players.length);
+    const isLobbyFull = room.players.length >= lobbyMaxPlayers;
+
     return (
       <div className="max-w-4xl mx-auto p-4 md:p-6 space-y-6 text-slate-800">
         {/* Header Bar */}
         <div className="bg-white border border-slate-200/90 rounded-3xl p-5 md:p-6 shadow-xs backdrop-blur-md">
           <div className="flex flex-col md:flex-row items-center justify-between gap-4">
             <div>
-              <div className="flex items-center gap-2 mb-1">
+              <div className="flex items-center flex-wrap gap-2 mb-1">
                 <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-900 border border-amber-300">
                   မြွေနှင့်လှေကားဂိမ်း (Multiplayer)
                 </span>
+                {isLobbyFull ? (
+                  <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                    လူစုံပြီ ({room.players.length}/{lobbyMaxPlayers})
+                  </span>
+                ) : (
+                  <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-sky-50 text-sky-700 border border-sky-200">
+                    ကစားသမား စောင့်ဆိုင်းဆဲ ({room.players.length}/{lobbyMaxPlayers})
+                  </span>
+                )}
                 <span className="text-xs text-slate-500">
                   {room.exactFinish ? '★ အတိအကျဝင်ရန်လိုသည်' : '★ သာမန်စည်းမျဉ်း'}
                 </span>
@@ -508,7 +559,7 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
           <div className="flex items-center justify-between px-2">
             <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
               <Users className="w-5 h-5 text-amber-600" />
-              <span>ပါဝင်သူများ ({room.players.length} / {room.maxPlayers})</span>
+              <span>ပါဝင်သူများ ({room.players.length} / {lobbyMaxPlayers})</span>
             </h2>
             <div className="text-xs text-slate-500">
               ဂိမ်းစတင်ရန် အနည်းဆုံး ၂ ဦး လိုအပ်ပါသည်
@@ -584,7 +635,7 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, onExitRoom }) => {
             })}
 
             {/* Empty Slots */}
-            {Array.from({ length: room.maxPlayers - room.players.length }).map((_, i) => (
+            {Array.from({ length: emptySlotCount }).map((_, i) => (
               <div
                 key={`empty-${i}`}
                 className="border-2 border-dashed border-slate-200/90 rounded-2xl p-6 flex flex-col items-center justify-center text-center text-slate-400 bg-slate-50/50 min-h-[170px]"

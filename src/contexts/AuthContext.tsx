@@ -91,7 +91,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             userDocRef,
             (snapshot) => {
               if (snapshot.exists()) {
-                setUserProfile(snapshot.data() as UserProfile);
+                const rawProfile = snapshot.data() as UserProfile;
+                setUserProfile({
+                  ...rawProfile,
+                  id: rawProfile.id || snapshot.id || user.uid,
+                });
               }
             },
             (error) => {

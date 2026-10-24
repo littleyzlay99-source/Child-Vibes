@@ -71,14 +71,17 @@ export interface RoomPlayer {
   disconnectedAt?: number | null; // Timestamp when disconnected
 }
 
+export type RoomStatus = 'waiting' | 'full' | 'playing' | 'finished';
+
 export interface GameRoom {
   id: string;
   roomCode: string;
   gameType: string;
   hostId: string;
   hostName: string;
-  status: 'waiting' | 'playing' | 'finished';
+  status: RoomStatus;
   maxPlayers: number;
+  playerCount?: number; // Synchronized count of unique active players
   players: RoomPlayer[];
   currentTurnIndex: number;
   lastDiceRoll: number;
@@ -104,6 +107,12 @@ export interface GameRoom {
   createdAt: string;
   updatedAt: string;
   serverUpdatedAt?: unknown; // Firestore serverTimestamp()
+}
+
+export interface JoinRoomResult {
+  roomId: string;
+  room: GameRoom;
+  alreadyJoined: boolean;
 }
 
 export interface PointTransaction {

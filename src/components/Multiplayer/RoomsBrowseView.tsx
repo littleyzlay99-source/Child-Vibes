@@ -1,27 +1,33 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { collection, query, where, onSnapshot } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { GameRoom } from '../../types';
 import { useAuth } from '../../contexts/AuthContext';
-import { createGameRoom, joinGameRoomByCode } from '../../services/roomService';
+import {
+  createGameRoom,
+  joinGameRoomByCode,
+  deduplicateRoomPlayers,
+  normalizeMaxPlayers,
+  RoomJoinError,
+  RoomJoinErrorCode,
+} from '../../services/roomService';
 import { sounds } from '../../lib/sound';
 import {
   Users,
   PlusCircle,
   LogIn,
   Play,
-  Sparkles,
   ShieldAlert,
-  Crown,
-  Search,
+  WifiOff,
+  CheckCircle2,
 } from 'lucide-react';
 
 interface RoomsBrowseViewProps {
-  onEnterRoom: (roomId: string) => void;
+  onEnterRoom: (roomId: string, room?: GameRoom) => void;
 }
 
 export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom }) => {
-  const { userProfile } = useAuth();
+  const { currentUser, userProfile } = useAuth();
   const [rooms, setRooms] = useState<GameRoom[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [joinCodeInput, setJoinCodeInput] = useState<string>('');
@@ -29,18 +35,35 @@ export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom })
   const [maxPlayers, setMaxPlayers] = useState<number>(4);
   const [exactFinishRule, setExactFinishRule] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [joiningRoomCode, setJoiningRoomCode] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<RoomJoinErrorCode | null>(null);
+
+  const actionLockRef = useRef<boolean>(false);
+  const isMountedRef = useRef<boolean>(true);
 
   useEffect(() => {
+    isMountedRef.current = true;
     const roomsCol = collection(db, 'rooms');
-    const q = query(roomsCol, where('status', '==', 'waiting'));
+    // Subscribe once to both 'waiting' and 'full' lobby rooms so real-time capacity & Full status stay synced
+    const q = query(roomsCol, where('status', 'in', ['waiting', 'full']));
 
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {
+        if (!isMountedRef.current) return;
         const list: GameRoom[] = [];
         snapshot.forEach((docSnap) => {
-          list.push(docSnap.data() as GameRoom);
+          const data = docSnap.data() as GameRoom;
+          const uniquePlayers = deduplicateRoomPlayers(data.players, data.playerPositions);
+          const normalizedMax = normalizeMaxPlayers(data.maxPlayers);
+          list.push({
+            ...data,
+            id: data.id || docSnap.id,
+            maxPlayers: normalizedMax,
+            playerCount: uniquePlayers.length,
+            players: uniquePlayers,
+          });
         });
         // Sort newest first
         list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
@@ -49,46 +72,76 @@ export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom })
       },
       (error) => {
         console.error('Browse rooms listener error:', error);
-        setLoading(false);
+        if (isMountedRef.current) {
+          setLoading(false);
+        }
       }
     );
 
-    return () => unsubscribe();
+    return () => {
+      isMountedRef.current = false;
+      unsubscribe();
+    };
   }, []);
 
   const handleCreate = async () => {
-    if (!userProfile) return;
+    if (!userProfile || actionLockRef.current || isSubmitting) return;
+    actionLockRef.current = true;
     setIsSubmitting(true);
     setErrorMsg(null);
+    setErrorCode(null);
     sounds.playClick();
+
     try {
-      const roomId = await createGameRoom(userProfile, maxPlayers, exactFinishRule);
+      const result = await createGameRoom(userProfile, maxPlayers, exactFinishRule);
       setShowCreateModal(false);
-      onEnterRoom(roomId);
+      actionLockRef.current = false;
+      onEnterRoom(result.roomId, result.room);
     } catch (err: any) {
-      setErrorMsg(err.message || 'အခန်းဖွင့်ခြင်း မအောင်မြင်ပါ');
-    } finally {
-      setIsSubmitting(false);
+      if (isMountedRef.current) {
+        setErrorCode(err instanceof RoomJoinError ? err.code : 'UNKNOWN_ERROR');
+        setErrorMsg(err?.message || 'အခန်းဖွင့်ခြင်း မအောင်မြင်ပါ');
+        setIsSubmitting(false);
+      }
+      actionLockRef.current = false;
     }
   };
 
   const handleJoinDirect = async (roomCode: string) => {
-    if (!userProfile) return;
+    const cleaned = roomCode.replace(/^#/, '').trim().toUpperCase();
+    if (!userProfile || !cleaned || actionLockRef.current || joiningRoomCode !== null) return;
+
+    actionLockRef.current = true;
+    setJoiningRoomCode(cleaned);
+    setErrorMsg(null);
+    setErrorCode(null);
     sounds.playClick();
+
     try {
-      const roomId = await joinGameRoomByCode(roomCode, userProfile);
-      onEnterRoom(roomId);
+      const result = await joinGameRoomByCode(cleaned, userProfile);
+      actionLockRef.current = false;
+      // Navigate immediately on authoritative backend transaction success; never show an error on success
+      onEnterRoom(result.roomId, result.room);
     } catch (err: any) {
-      setErrorMsg(err.message || 'အခန်းသို့ ဝင်ရောက်ခြင်း မအောင်မြင်ပါ');
-      setTimeout(() => setErrorMsg(null), 3000);
+      if (isMountedRef.current) {
+        const code: RoomJoinErrorCode =
+          err instanceof RoomJoinError ? err.code : 'UNKNOWN_ERROR';
+        setErrorCode(code);
+        setErrorMsg(err?.message || 'အခန်းသို့ ဝင်ရောက်ခြင်း မအောင်မြင်ပါ');
+        setJoiningRoomCode(null);
+      }
+      actionLockRef.current = false;
     }
   };
 
   const handleJoinByInput = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!userProfile || !joinCodeInput.trim()) return;
-    handleJoinDirect(joinCodeInput.trim());
+    if (!userProfile || !joinCodeInput.trim() || actionLockRef.current) return;
+    await handleJoinDirect(joinCodeInput.trim());
   };
+
+  const currentUid = currentUser?.uid || userProfile?.id;
+  const isBusy = isSubmitting || joiningRoomCode !== null;
 
   return (
     <div className="max-w-5xl mx-auto p-4 md:p-6 space-y-6">
@@ -113,11 +166,14 @@ export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom })
               value={joinCodeInput}
               onChange={(e) => setJoinCodeInput(e.target.value.toUpperCase())}
               maxLength={8}
-              className="w-full bg-slate-50 text-amber-800 font-mono text-xs font-bold pl-3 pr-8 py-2.5 rounded-xl border border-slate-300 focus:border-amber-400 focus:bg-white focus:outline-hidden"
+              disabled={isBusy}
+              className="w-full bg-slate-50 text-amber-800 font-mono text-xs font-bold pl-3 pr-8 py-2.5 rounded-xl border border-slate-300 focus:border-amber-400 focus:bg-white focus:outline-hidden disabled:opacity-60"
             />
             <button
               type="submit"
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-amber-600"
+              disabled={isBusy || !joinCodeInput.trim()}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-amber-600 disabled:opacity-40 cursor-pointer"
+              title="ကုဒ်ဖြင့် ဝင်မည်"
             >
               <LogIn className="w-4 h-4" />
             </button>
@@ -125,10 +181,13 @@ export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom })
 
           <button
             onClick={() => {
+              if (isBusy) return;
               sounds.playClick();
+              setErrorMsg(null);
               setShowCreateModal(true);
             }}
-            className="px-5 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs md:text-sm flex items-center gap-1.5 shadow-sm transition cursor-pointer whitespace-nowrap"
+            disabled={isBusy}
+            className="px-5 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs md:text-sm flex items-center gap-1.5 shadow-sm transition cursor-pointer whitespace-nowrap disabled:opacity-60"
           >
             <PlusCircle className="w-4 h-4" />
             <span>အခန်းအသစ်ဖွင့်မည်</span>
@@ -136,10 +195,33 @@ export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom })
         </div>
       </div>
 
+      {/* Distinct Error Banner (Network Error vs Room Full / Validation Error) */}
       {errorMsg && (
-        <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-bold flex items-center gap-2 animate-in fade-in">
-          <ShieldAlert className="w-4 h-4 text-rose-600 shrink-0" />
-          <span>{errorMsg}</span>
+        <div
+          className={`p-3.5 rounded-2xl border text-xs font-bold flex items-center justify-between gap-2 animate-in fade-in ${
+            errorCode === 'NETWORK_ERROR'
+              ? 'bg-amber-50 border-amber-300 text-amber-900'
+              : 'bg-rose-50 border-rose-200 text-rose-700'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {errorCode === 'NETWORK_ERROR' ? (
+              <WifiOff className="w-4 h-4 text-amber-700 shrink-0" />
+            ) : (
+              <ShieldAlert className="w-4 h-4 text-rose-600 shrink-0" />
+            )}
+            <span>{errorMsg}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setErrorMsg(null);
+              setErrorCode(null);
+            }}
+            className="px-2 py-0.5 rounded-lg bg-white/70 hover:bg-white text-[11px] font-semibold cursor-pointer"
+          >
+            ပိတ်မည်
+          </button>
         </div>
       )}
 
@@ -164,7 +246,8 @@ export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom })
               sounds.playClick();
               setShowCreateModal(true);
             }}
-            className="mt-2 px-6 py-3 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs inline-flex items-center gap-2 shadow-xs cursor-pointer"
+            disabled={isBusy}
+            className="mt-2 px-6 py-3 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs inline-flex items-center gap-2 shadow-xs cursor-pointer disabled:opacity-60"
           >
             <PlusCircle className="w-4 h-4" />
             <span>အခန်းအသစ် ဖန်တီးမည်</span>
@@ -173,20 +256,44 @@ export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom })
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {rooms.map((room) => {
-            const isFull = room.players.length >= room.maxPlayers;
+            const uniquePlayers = deduplicateRoomPlayers(room.players, room.playerPositions);
+            const maxCap = normalizeMaxPlayers(room.maxPlayers);
+            const activeCount = uniquePlayers.length;
+            const isAlreadyJoined =
+              !!currentUid && uniquePlayers.some((p) => p.uid === currentUid);
+            const isCapacityFull = activeCount >= maxCap;
+            const isBlockedByFull = !isAlreadyJoined && isCapacityFull;
+            const isJoiningThisRoom = joiningRoomCode === room.roomCode;
+
             return (
               <div
                 key={room.id}
                 className="bg-white border border-slate-200/90 hover:border-amber-300 rounded-3xl p-5 flex flex-col justify-between shadow-xs hover:shadow-md transition-all"
               >
                 <div>
-                  <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center justify-between gap-2 mb-3">
                     <span className="font-mono font-black text-amber-700 text-sm tracking-wider">
                       #{room.roomCode}
                     </span>
-                    <span className="px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-600 text-[11px] font-bold border border-slate-200">
-                      {room.players.length} / {room.maxPlayers} ဦး
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      {isAlreadyJoined ? (
+                        <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold border border-emerald-200 flex items-center gap-1">
+                          <CheckCircle2 className="w-3 h-3" />
+                          <span>ဝင်ထားပြီး</span>
+                        </span>
+                      ) : isCapacityFull ? (
+                        <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 text-[10px] font-bold border border-rose-200">
+                          Full
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold border border-emerald-200">
+                          Waiting
+                        </span>
+                      )}
+                      <span className="px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-700 text-[11px] font-bold border border-slate-200">
+                        {activeCount} / {maxCap} ဦး
+                      </span>
+                    </div>
                   </div>
 
                   <div className="flex items-center gap-2 mb-2">
@@ -209,15 +316,35 @@ export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom })
 
                 <button
                   onClick={() => handleJoinDirect(room.roomCode)}
-                  disabled={isFull}
+                  disabled={isBlockedByFull || isBusy}
                   className={`w-full py-2.5 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition ${
-                    isFull
+                    isJoiningThisRoom
+                      ? 'bg-amber-300 text-slate-950 cursor-wait'
+                      : isAlreadyJoined
+                      ? 'bg-emerald-500 hover:bg-emerald-600 text-white shadow-xs cursor-pointer disabled:opacity-60'
+                      : isBlockedByFull
                       ? 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200'
-                      : 'bg-amber-400 hover:bg-amber-300 text-slate-950 shadow-xs cursor-pointer'
+                      : 'bg-amber-400 hover:bg-amber-300 text-slate-950 shadow-xs cursor-pointer disabled:opacity-60'
                   }`}
                 >
-                  <Play className="w-3.5 h-3.5 fill-current" />
-                  <span>{isFull ? 'လူပြည့်နေပါသည်' : 'အခန်းသို့ ဝင်ရောက်မည်'}</span>
+                  {isJoiningThisRoom ? (
+                    <>
+                      <span className="w-3.5 h-3.5 border-2 border-slate-900 border-t-transparent rounded-full animate-spin" />
+                      <span>အခန်းသို့ ဝင်ရောက်နေသည်...</span>
+                    </>
+                  ) : isAlreadyJoined ? (
+                    <>
+                      <Play className="w-3.5 h-3.5 fill-current" />
+                      <span>အခန်းတွင်းသို့ ပြန်ဝင်မည်</span>
+                    </>
+                  ) : isBlockedByFull ? (
+                    <span>အခန်းလူပြည့်နေပါသည်</span>
+                  ) : (
+                    <>
+                      <Play className="w-3.5 h-3.5 fill-current" />
+                      <span>အခန်းသို့ ဝင်ရောက်မည်</span>
+                    </>
+                  )}
                 </button>
               </div>
             );
@@ -274,7 +401,8 @@ export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom })
                 <button
                   type="button"
                   onClick={() => setShowCreateModal(false)}
-                  className="flex-1 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs transition cursor-pointer"
+                  disabled={isSubmitting}
+                  className="flex-1 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs transition cursor-pointer disabled:opacity-50"
                 >
                   ပယ်ဖျက်
                 </button>

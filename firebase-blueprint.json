@@ -116,12 +116,16 @@
         },
         "status": {
           "type": "string",
-          "description": "Room status: waiting, playing, finished",
-          "enum": ["waiting", "playing", "finished"]
+          "description": "Room status: waiting, full, playing, finished",
+          "enum": ["waiting", "full", "playing", "finished"]
         },
         "maxPlayers": {
           "type": "number",
           "description": "Maximum players allowed"
+        },
+        "playerCount": {
+          "type": "number",
+          "description": "Authoritative count of unique active players in the room"
         },
         "players": {
           "type": "array",

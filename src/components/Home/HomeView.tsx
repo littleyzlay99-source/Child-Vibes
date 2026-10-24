@@ -1,7 +1,12 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
-import { createGameRoom, joinGameRoomByCode } from '../../services/roomService';
-import { MiniGameCard } from '../../types';
+import {
+  createGameRoom,
+  joinGameRoomByCode,
+  RoomJoinError,
+  RoomJoinErrorCode,
+} from '../../services/roomService';
+import { GameRoom, MiniGameCard } from '../../types';
 import { sounds } from '../../lib/sound';
 import {
   Gamepad2,
@@ -17,10 +22,11 @@ import {
   Clock,
   ArrowRight,
   Shield,
+  WifiOff,
 } from 'lucide-react';
 
 interface HomeViewProps {
-  onEnterRoom: (roomId: string) => void;
+  onEnterRoom: (roomId: string, room?: GameRoom) => void;
   onNavigateToShop: () => void;
   onNavigateToLeaderboard: () => void;
 }
@@ -39,7 +45,9 @@ export const HomeView: React.FC<HomeViewProps> = ({
   const [exactFinishRule, setExactFinishRule] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<RoomJoinErrorCode | null>(null);
   const [dailyMsg, setDailyMsg] = useState<string | null>(null);
+  const submitLockRef = useRef<boolean>(false);
 
   const categories = [
     { id: 'all', label: 'အားလုံး' },
@@ -127,35 +135,45 @@ export const HomeView: React.FC<HomeViewProps> = ({
       : miniGames.filter((g) => g.category === selectedCategory);
 
   const handleCreateRoom = async () => {
-    if (!userProfile) return;
+    if (!userProfile || submitLockRef.current || isSubmitting) return;
+    submitLockRef.current = true;
     setIsSubmitting(true);
     setErrorMsg(null);
+    setErrorCode(null);
     sounds.playClick();
     try {
-      const roomId = await createGameRoom(userProfile, maxPlayers, exactFinishRule);
+      const result = await createGameRoom(userProfile, maxPlayers, exactFinishRule);
       setShowCreateModal(false);
-      onEnterRoom(roomId);
-    } catch (err: any) {
-      setErrorMsg(err.message || 'အခန်းဖန်တီးခြင်း မအောင်မြင်ပါ');
-    } finally {
       setIsSubmitting(false);
+      submitLockRef.current = false;
+      onEnterRoom(result.roomId, result.room);
+    } catch (err: any) {
+      setErrorCode(err instanceof RoomJoinError ? err.code : 'UNKNOWN_ERROR');
+      setErrorMsg(err?.message || 'အခန်းဖန်တီးခြင်း မအောင်မြင်ပါ');
+      setIsSubmitting(false);
+      submitLockRef.current = false;
     }
   };
 
   const handleJoinRoom = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!userProfile || !joinCodeInput.trim()) return;
+    if (!userProfile || !joinCodeInput.trim() || submitLockRef.current || isSubmitting) return;
+    submitLockRef.current = true;
     setIsSubmitting(true);
     setErrorMsg(null);
+    setErrorCode(null);
     sounds.playClick();
     try {
-      const roomId = await joinGameRoomByCode(joinCodeInput.trim(), userProfile);
+      const result = await joinGameRoomByCode(joinCodeInput.trim(), userProfile);
       setShowJoinModal(false);
-      onEnterRoom(roomId);
-    } catch (err: any) {
-      setErrorMsg(err.message || 'အခန်းသို့ ဝင်ရောက်ခြင်း မအောင်မြင်ပါ');
-    } finally {
       setIsSubmitting(false);
+      submitLockRef.current = false;
+      onEnterRoom(result.roomId, result.room);
+    } catch (err: any) {
+      setErrorCode(err instanceof RoomJoinError ? err.code : 'UNKNOWN_ERROR');
+      setErrorMsg(err?.message || 'အခန်းသို့ ဝင်ရောက်ခြင်း မအောင်မြင်ပါ');
+      setIsSubmitting(false);
+      submitLockRef.current = false;
     }
   };
 
@@ -190,6 +208,8 @@ export const HomeView: React.FC<HomeViewProps> = ({
             <button
               onClick={() => {
                 sounds.playClick();
+                setErrorMsg(null);
+                setErrorCode(null);
                 setShowCreateModal(true);
               }}
               className="px-6 py-3.5 rounded-2xl bg-slate-950 hover:bg-slate-900 text-amber-400 font-black text-sm md:text-base flex items-center gap-2 shadow-xl hover:scale-105 active:scale-95 transition cursor-pointer"
@@ -201,6 +221,8 @@ export const HomeView: React.FC<HomeViewProps> = ({
             <button
               onClick={() => {
                 sounds.playClick();
+                setErrorMsg(null);
+                setErrorCode(null);
                 setShowJoinModal(true);
               }}
               className="px-6 py-3.5 rounded-2xl bg-white/90 hover:bg-white text-slate-950 font-bold text-sm md:text-base flex items-center gap-2 shadow-lg hover:scale-105 active:scale-95 transition cursor-pointer"
@@ -405,8 +427,15 @@ export const HomeView: React.FC<HomeViewProps> = ({
             </p>
 
             {errorMsg && (
-              <div className="mb-4 p-3 rounded-xl bg-rose-50 border border-rose-300 text-rose-800 text-xs font-semibold">
-                {errorMsg}
+              <div
+                className={`mb-4 p-3 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
+                  errorCode === 'NETWORK_ERROR'
+                    ? 'bg-amber-50 border-amber-300 text-amber-900'
+                    : 'bg-rose-50 border-rose-300 text-rose-800'
+                }`}
+              >
+                {errorCode === 'NETWORK_ERROR' && <WifiOff className="w-4 h-4 shrink-0" />}
+                <span>{errorMsg}</span>
               </div>
             )}
 
@@ -490,8 +519,15 @@ export const HomeView: React.FC<HomeViewProps> = ({
             </p>
 
             {errorMsg && (
-              <div className="mb-4 p-3 rounded-xl bg-rose-50 border border-rose-300 text-rose-800 text-xs font-semibold">
-                {errorMsg}
+              <div
+                className={`mb-4 p-3 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
+                  errorCode === 'NETWORK_ERROR'
+                    ? 'bg-amber-50 border-amber-300 text-amber-900'
+                    : 'bg-rose-50 border-rose-300 text-rose-800'
+                }`}
+              >
+                {errorCode === 'NETWORK_ERROR' && <WifiOff className="w-4 h-4 shrink-0" />}
+                <span>{errorMsg}</span>
               </div>
             )}
 
