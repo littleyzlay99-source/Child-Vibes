@@ -1,57 +1,428 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    
+
+    // Global Safety Net (Default Deny Catch-All First)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core Primitives
     function isSignedIn() {
       return request.auth != null;
     }
-    
+
     function isOwner(userId) {
       return isSignedIn() && request.auth.uid == userId;
     }
 
     function isValidId(id) {
-      return id is string && id.size() <= 128;
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
-    // Default deny
-    match /{document=**} {
-      allow read, write: if false;
+    function incoming() {
+      return request.resource.data;
     }
 
-    // Users Collection
+    function existing() {
+      return resource.data;
+    }
+
+    // Deterministic Level 1-999 Curve Helpers (Mirrors progressionService.ts bit-for-bit)
+    // Lv 1-100: 150 XP/level (15,000 XP span); Lv 101-999: 300 XP/level (284,400 XP total to Lv 999)
+    function computeLevelRule(totalXp) {
+      return int(totalXp) >= 284400
+        ? 999
+        : (int(totalXp) < 15000
+          ? 1 + (int(totalXp) / 150)
+          : 101 + ((int(totalXp) - 15000) / 300));
+    }
+
+    function computeCurrentLevelXpRule(totalXp) {
+      return int(totalXp) >= 284400
+        ? (int(totalXp) - 284400)
+        : (int(totalXp) < 15000
+          ? (int(totalXp) % 150)
+          : ((int(totalXp) - 15000) % 300));
+    }
+
+    function computeLegacyTotalXpRule(lvl, xpVal) {
+      let clampedLvl = int(lvl) < 1 ? 1 : (int(lvl) > 999 ? 999 : int(lvl));
+      let safeXp = int(xpVal) < 0 ? 0 : int(xpVal);
+      let base = clampedLvl <= 1
+        ? 0
+        : (clampedLvl <= 101
+          ? (clampedLvl - 1) * 150
+          : 15000 + (clampedLvl - 101) * 300);
+      return base + safeXp;
+    }
+
+    function existingTotalXpRule(data) {
+      return ('totalXp' in data && data.totalXp is number)
+        ? int(data.totalXp)
+        : computeLegacyTotalXpRule(data.level, data.xp);
+    }
+
+    function existingCurrentPointsRule(data) {
+      return ('currentPoints' in data && data.currentPoints is number)
+        ? int(data.currentPoints)
+        : int(data.points);
+    }
+
+    function existingTotalPointsEarnedRule(data) {
+      return ('totalPointsEarned' in data && data.totalPointsEarned is number)
+        ? int(data.totalPointsEarned)
+        : existingCurrentPointsRule(data);
+    }
+
+    // Entity Blueprint Validators (Anti-Update-Gap)
+    function isValidUserCreateKeys(data) {
+      return data.keys().hasOnly([
+        'id', 'playerId', 'displayName', 'email', 'photoURL',
+        'level', 'xp', 'totalXp',
+        'points', 'currentPoints', 'totalPointsEarned',
+        'totalWins', 'totalGames',
+        'activeFrame', 'activeBoardSkin', 'activeDiceSkin', 'activeTokenSkin',
+        'inventory', 'claimedAchievements',
+        'lastClaimId', 'lastDailyClaimId', 'lastAchievementClaimId',
+        'activeRoomId', 'activeRoomCode', 'activeGameType',
+        'createdAt', 'updatedAt'
+      ]);
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['id', 'playerId', 'displayName', 'level', 'xp', 'points', 'totalWins', 'totalGames', 'inventory']) &&
+        data.id is string && data.id.size() <= 128 && data.id == request.auth.uid &&
+        data.playerId is string && data.playerId.size() >= 2 && data.playerId.size() <= 24 &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60 &&
+        (!('email' in data) || (data.email is string && data.email.size() <= 120)) &&
+        (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 1000)) &&
+        data.level is number && data.level >= 1 && data.level <= 999 &&
+        data.xp is number && data.xp >= 0 &&
+        (!('totalXp' in data) || (data.totalXp is number && data.totalXp >= 0)) &&
+        data.points is number && data.points >= 0 &&
+        (!('currentPoints' in data) || (data.currentPoints is number && data.currentPoints == data.points)) &&
+        (!('totalPointsEarned' in data) || (data.totalPointsEarned is number && data.totalPointsEarned >= data.points)) &&
+        data.totalWins is number && data.totalWins >= 0 &&
+        data.totalGames is number && data.totalGames >= 0 &&
+        (!('activeFrame' in data) || (data.activeFrame is string && data.activeFrame.size() <= 50)) &&
+        (!('activeBoardSkin' in data) || (data.activeBoardSkin is string && data.activeBoardSkin.size() <= 50)) &&
+        (!('activeDiceSkin' in data) || (data.activeDiceSkin is string && data.activeDiceSkin.size() <= 50)) &&
+        (!('activeTokenSkin' in data) || (data.activeTokenSkin is string && data.activeTokenSkin.size() <= 50)) &&
+        data.inventory is list && data.inventory.size() <= 50 &&
+        (data.inventory.size() == 0 || (data.inventory[0] is string && data.inventory[0].size() <= 50)) &&
+        (!('claimedAchievements' in data) || (
+          data.claimedAchievements is list && data.claimedAchievements.size() <= 30 &&
+          (data.claimedAchievements.size() == 0 || (data.claimedAchievements[0] is string && data.claimedAchievements[0].size() <= 40))
+        )) &&
+        (!('lastClaimId' in data) || data.lastClaimId == null || (data.lastClaimId is string && data.lastClaimId.size() <= 128)) &&
+        (!('lastDailyClaimId' in data) || data.lastDailyClaimId == null || (data.lastDailyClaimId is string && data.lastDailyClaimId.size() <= 128)) &&
+        (!('lastAchievementClaimId' in data) || data.lastAchievementClaimId == null || (data.lastAchievementClaimId is string && data.lastAchievementClaimId.size() <= 128)) &&
+        (!('activeRoomId' in data) || data.activeRoomId == null || (data.activeRoomId is string && data.activeRoomId.size() <= 64)) &&
+        (!('activeRoomCode' in data) || data.activeRoomCode == null || (data.activeRoomCode is string && data.activeRoomCode.size() <= 16)) &&
+        (!('activeGameType' in data) || data.activeGameType == null || (data.activeGameType is string && data.activeGameType.size() <= 40)) &&
+        (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 40)) &&
+        (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 40));
+    }
+
+    function isValidGameRoom(data) {
+      return data.keys().hasAll(['id', 'roomCode', 'gameType', 'hostId', 'status', 'maxPlayers', 'players']) &&
+        data.id is string && data.id.size() <= 64 &&
+        data.roomCode is string && data.roomCode.size() >= 4 && data.roomCode.size() <= 16 &&
+        data.gameType is string && data.gameType.size() <= 40 &&
+        data.hostId is string && data.hostId.size() <= 128 &&
+        (!('hostName' in data) || (data.hostName is string && data.hostName.size() <= 60)) &&
+        data.status in ['waiting', 'full', 'playing', 'finished'] &&
+        data.maxPlayers is number && data.maxPlayers >= 2 && data.maxPlayers <= 4 &&
+        data.players is list && data.players.size() >= 1 && data.players.size() <= 4 &&
+        (!('matchParticipantIds' in data) || (
+          data.matchParticipantIds is list && data.matchParticipantIds.size() <= 4 &&
+          (data.matchParticipantIds.size() == 0 || (data.matchParticipantIds[0] is string && data.matchParticipantIds[0].size() <= 128))
+        )) &&
+        (!('lastMoveSummary' in data) || (data.lastMoveSummary is string && data.lastMoveSummary.size() <= 500)) &&
+        (!('winnerId' in data) || data.winnerId == null || (data.winnerId is string && data.winnerId.size() <= 128)) &&
+        (!('winnerName' in data) || data.winnerName == null || (data.winnerName is string && data.winnerName.size() <= 60)) &&
+        (!('lastMovePath' in data) || (data.lastMovePath is list && data.lastMovePath.size() <= 20));
+    }
+
+    function isValidMatchRewardClaim(data) {
+      return data.keys().hasAll(['id', 'userId', 'roomId', 'gameRound', 'outcome', 'xpGranted', 'pointsGranted', 'createdAt', 'serverCreatedAt']) &&
+        data.keys().hasOnly(['id', 'userId', 'roomId', 'gameRound', 'outcome', 'xpGranted', 'pointsGranted', 'createdAt', 'serverCreatedAt']) &&
+        data.id is string && data.id.size() <= 128 &&
+        data.userId is string && data.userId.size() <= 128 && data.userId == request.auth.uid &&
+        data.roomId is string && data.roomId.size() <= 64 && isValidId(data.roomId) &&
+        data.gameRound is int && data.gameRound >= 1 &&
+        data.outcome in ['win', 'loss'] &&
+        data.xpGranted is int && (data.xpGranted == 100 || data.xpGranted == 75) &&
+        data.pointsGranted is int && (data.pointsGranted == 1000 || data.pointsGranted == 500) &&
+        data.createdAt is string && data.createdAt.size() <= 40 &&
+        data.serverCreatedAt == request.time;
+    }
+
+    function isValidDailyClaim(data) {
+      return data.keys().hasAll(['id', 'userId', 'dayBucket', 'xpGranted', 'pointsGranted', 'createdAt', 'serverCreatedAt']) &&
+        data.keys().hasOnly(['id', 'userId', 'dayBucket', 'xpGranted', 'pointsGranted', 'createdAt', 'serverCreatedAt']) &&
+        data.id is string && data.id.size() <= 128 &&
+        data.userId is string && data.userId.size() <= 128 && data.userId == request.auth.uid &&
+        data.dayBucket is int && data.dayBucket >= 19000 &&
+        data.xpGranted == 80 &&
+        data.pointsGranted == 100 &&
+        data.createdAt is string && data.createdAt.size() <= 40 &&
+        data.serverCreatedAt == request.time;
+    }
+
+    function isValidAchievementClaim(data) {
+      return data.keys().hasAll(['id', 'userId', 'achievementId', 'xpGranted', 'pointsGranted', 'createdAt', 'serverCreatedAt']) &&
+        data.keys().hasOnly(['id', 'userId', 'achievementId', 'xpGranted', 'pointsGranted', 'createdAt', 'serverCreatedAt']) &&
+        data.id is string && data.id.size() <= 128 &&
+        data.userId is string && data.userId.size() <= 128 && data.userId == request.auth.uid &&
+        data.achievementId is string && data.achievementId in ['first_win', 'win_5', 'games_10', 'reach_lvl_5'] &&
+        data.xpGranted is int && data.xpGranted > 0 &&
+        data.pointsGranted is int && data.pointsGranted > 0 &&
+        data.createdAt is string && data.createdAt.size() <= 40 &&
+        data.serverCreatedAt == request.time;
+    }
+
+    function isValidTransaction(data) {
+      return data.keys().hasAll(['id', 'userId', 'type', 'amount', 'description', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'userId', 'type', 'amount', 'xpAmount', 'description', 'createdAt']) &&
+        data.id is string && data.id.size() <= 128 &&
+        data.userId is string && data.userId.size() <= 128 && data.userId == request.auth.uid &&
+        data.type is string && data.type.size() <= 40 &&
+        data.amount is number &&
+        (!('xpAmount' in data) || (data.xpAmount is number && data.xpAmount >= 0)) &&
+        data.description is string && data.description.size() <= 240 &&
+        data.createdAt is string && data.createdAt.size() <= 40;
+    }
+
+    // Verified Match Outcome Relational Helper
+    function isServerVerifiedMatchReward(claim) {
+      let room = get(/databases/$(database)/documents/rooms/$(claim.roomId)).data;
+      let roomRound = ('gameRound' in room && room.gameRound is number) ? int(room.gameRound) : 1;
+      let isParticipant =
+        room.winnerId == request.auth.uid ||
+        ('matchParticipantIds' in room && room.matchParticipantIds is list && request.auth.uid in room.matchParticipantIds) ||
+        ('playerPositions' in room && room.playerPositions is map && request.auth.uid in room.playerPositions);
+
+      return room.status == 'finished' &&
+        room.winnerId is string && room.winnerId.size() > 0 &&
+        roomRound == claim.gameRound &&
+        isParticipant &&
+        (
+          (room.winnerId == request.auth.uid && claim.outcome == 'win' && claim.xpGranted == 100 && claim.pointsGranted == 1000) ||
+          (room.winnerId != request.auth.uid && claim.outcome == 'loss' && claim.xpGranted == 75 && claim.pointsGranted == 500)
+        );
+    }
+
+    // Verified Achievement Eligibility Helper
+    function isServerVerifiedAchievementReward(claim) {
+      let user = get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+      return (claim.achievementId == 'first_win' && user.totalWins >= 1 && claim.xpGranted == 150 && claim.pointsGranted == 100) ||
+        (claim.achievementId == 'win_5' && user.totalWins >= 5 && claim.xpGranted == 400 && claim.pointsGranted == 300) ||
+        (claim.achievementId == 'games_10' && user.totalGames >= 10 && claim.xpGranted == 300 && claim.pointsGranted == 200) ||
+        (claim.achievementId == 'reach_lvl_5' && user.level >= 5 && claim.xpGranted == 500 && claim.pointsGranted == 500);
+    }
+
+    // 1. Users Collection (Anti-Tamper Action-Based Progression & Separated Point Balances)
     match /users/{userId} {
-      allow read: if isSignedIn();
-      allow create: if isOwner(userId) && request.resource.data.id == request.auth.uid;
-      allow update: if isSignedIn() && (
-        isOwner(userId) ||
-        // Allow updating game stats / points when finished game if player is in room
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['totalGames', 'totalWins', 'points', 'xp', 'level', 'updatedAt'])
-      );
-      allow delete: if isOwner(userId);
+      allow get: if isSignedIn() && isValidId(userId);
+      allow list: if isSignedIn() && resource.data.level is number && resource.data.level >= 1;
+
+      allow create: if isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUserCreateKeys(incoming()) &&
+        isValidUser(incoming()) &&
+        incoming().level == 1 &&
+        incoming().xp == 0 &&
+        incoming().totalXp == 0 &&
+        incoming().points == 500 &&
+        incoming().currentPoints == 500 &&
+        incoming().totalPointsEarned == 500 &&
+        incoming().totalWins == 0 &&
+        incoming().totalGames == 0;
+
+      allow update: if isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUser(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().playerId == existing().playerId && (
+          // Action 1: Non-Economy Profile, Cosmetic Equip, or Active Room Session Update
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'photoURL',
+              'activeFrame', 'activeBoardSkin', 'activeDiceSkin', 'activeTokenSkin',
+              'activeRoomId', 'activeRoomCode', 'activeGameType',
+              'updatedAt'
+            ])
+          ) ||
+          // Action 2: One-Time Backward-Compatible Normalization for Pre-Upgrade Accounts
+          (
+            (!('totalXp' in existing()) || !('totalPointsEarned' in existing()) || !('currentPoints' in existing())) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'totalXp', 'level', 'xp', 'points', 'currentPoints', 'totalPointsEarned', 'updatedAt'
+            ]) &&
+            int(incoming().points) == int(existing().points) &&
+            int(incoming().currentPoints) == int(existing().points) &&
+            int(incoming().totalPointsEarned) == existingTotalPointsEarnedRule(existing()) &&
+            int(incoming().totalXp) == existingTotalXpRule(existing()) &&
+            int(incoming().level) == computeLevelRule(incoming().totalXp) &&
+            int(incoming().xp) == computeCurrentLevelXpRule(incoming().totalXp)
+          ) ||
+          // Action 3: Server-Verified Atomic Match Reward Claim (+100 XP/+1000 Pts Win, +75 XP/+500 Pts Loss)
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'totalXp', 'level', 'xp', 'points', 'currentPoints', 'totalPointsEarned',
+              'totalGames', 'totalWins', 'lastClaimId', 'updatedAt'
+            ]) &&
+            incoming().lastClaimId is string && isValidId(incoming().lastClaimId) &&
+            !exists(/databases/$(database)/documents/reward_claims/$(incoming().lastClaimId)) &&
+            existsAfter(/databases/$(database)/documents/reward_claims/$(incoming().lastClaimId)) &&
+            getAfter(/databases/$(database)/documents/reward_claims/$(incoming().lastClaimId)).data.userId == userId &&
+            int(incoming().totalXp) == existingTotalXpRule(existing()) + getAfter(/databases/$(database)/documents/reward_claims/$(incoming().lastClaimId)).data.xpGranted &&
+            int(incoming().level) == computeLevelRule(incoming().totalXp) &&
+            int(incoming().xp) == computeCurrentLevelXpRule(incoming().totalXp) &&
+            int(incoming().points) == existingCurrentPointsRule(existing()) + getAfter(/databases/$(database)/documents/reward_claims/$(incoming().lastClaimId)).data.pointsGranted &&
+            int(incoming().currentPoints) == int(incoming().points) &&
+            int(incoming().totalPointsEarned) == existingTotalPointsEarnedRule(existing()) + getAfter(/databases/$(database)/documents/reward_claims/$(incoming().lastClaimId)).data.pointsGranted &&
+            int(incoming().totalGames) == int(existing().totalGames) + 1 &&
+            int(incoming().totalWins) == int(existing().totalWins) + (getAfter(/databases/$(database)/documents/reward_claims/$(incoming().lastClaimId)).data.outcome == 'win' ? 1 : 0)
+          ) ||
+          // Action 4: Server-Verified Atomic Daily Login Reward Claim
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'totalXp', 'level', 'xp', 'points', 'currentPoints', 'totalPointsEarned',
+              'lastDailyClaimId', 'updatedAt'
+            ]) &&
+            incoming().lastDailyClaimId is string && isValidId(incoming().lastDailyClaimId) &&
+            !exists(/databases/$(database)/documents/daily_claims/$(incoming().lastDailyClaimId)) &&
+            existsAfter(/databases/$(database)/documents/daily_claims/$(incoming().lastDailyClaimId)) &&
+            getAfter(/databases/$(database)/documents/daily_claims/$(incoming().lastDailyClaimId)).data.userId == userId &&
+            int(incoming().totalXp) == existingTotalXpRule(existing()) + getAfter(/databases/$(database)/documents/daily_claims/$(incoming().lastDailyClaimId)).data.xpGranted &&
+            int(incoming().level) == computeLevelRule(incoming().totalXp) &&
+            int(incoming().xp) == computeCurrentLevelXpRule(incoming().totalXp) &&
+            int(incoming().points) == existingCurrentPointsRule(existing()) + getAfter(/databases/$(database)/documents/daily_claims/$(incoming().lastDailyClaimId)).data.pointsGranted &&
+            int(incoming().currentPoints) == int(incoming().points) &&
+            int(incoming().totalPointsEarned) == existingTotalPointsEarnedRule(existing()) + getAfter(/databases/$(database)/documents/daily_claims/$(incoming().lastDailyClaimId)).data.pointsGranted
+          ) ||
+          // Action 5: Server-Verified Atomic Achievement Reward Claim
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'totalXp', 'level', 'xp', 'points', 'currentPoints', 'totalPointsEarned',
+              'claimedAchievements', 'lastAchievementClaimId', 'updatedAt'
+            ]) &&
+            incoming().lastAchievementClaimId is string && isValidId(incoming().lastAchievementClaimId) &&
+            !exists(/databases/$(database)/documents/achievement_claims/$(incoming().lastAchievementClaimId)) &&
+            existsAfter(/databases/$(database)/documents/achievement_claims/$(incoming().lastAchievementClaimId)) &&
+            getAfter(/databases/$(database)/documents/achievement_claims/$(incoming().lastAchievementClaimId)).data.userId == userId &&
+            int(incoming().totalXp) == existingTotalXpRule(existing()) + getAfter(/databases/$(database)/documents/achievement_claims/$(incoming().lastAchievementClaimId)).data.xpGranted &&
+            int(incoming().level) == computeLevelRule(incoming().totalXp) &&
+            int(incoming().xp) == computeCurrentLevelXpRule(incoming().totalXp) &&
+            int(incoming().points) == existingCurrentPointsRule(existing()) + getAfter(/databases/$(database)/documents/achievement_claims/$(incoming().lastAchievementClaimId)).data.pointsGranted &&
+            int(incoming().currentPoints) == int(incoming().points) &&
+            int(incoming().totalPointsEarned) == existingTotalPointsEarnedRule(existing()) + getAfter(/databases/$(database)/documents/achievement_claims/$(incoming().lastAchievementClaimId)).data.pointsGranted
+          ) ||
+          // Action 6: Shop Item Purchase (Deducts ONLY Current Points; Total Points Earned & XP/Level Unchanged!)
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'points', 'currentPoints', 'totalPointsEarned',
+              'totalXp', 'level', 'xp', 'inventory', 'updatedAt'
+            ]) &&
+            incoming().inventory.size() == existing().inventory.size() + 1 &&
+            int(incoming().points) <= existingCurrentPointsRule(existing()) &&
+            int(incoming().points) >= 0 &&
+            int(incoming().currentPoints) == int(incoming().points) &&
+            int(incoming().totalPointsEarned) == existingTotalPointsEarnedRule(existing()) &&
+            int(incoming().totalXp) == existingTotalXpRule(existing()) &&
+            int(incoming().level) == computeLevelRule(incoming().totalXp) &&
+            int(incoming().xp) == computeCurrentLevelXpRule(incoming().totalXp)
+          )
+        );
+
+      allow delete: if isOwner(userId) && isValidId(userId);
     }
 
-    // Game Rooms Collection
+    // 2. Game Rooms Collection (Monotonic State Version + Valid Match Lifecycle)
     match /rooms/{roomId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidId(roomId);
-      allow update: if isSignedIn() && (
-        // Allow isolated presence heartbeats that never touch players or positions
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['presence']) ||
-        // Allow upgrading legacy rooms that do not yet have stateVersion
-        !('stateVersion' in resource.data) ||
-        // Enforce strictly monotonic stateVersion on all game/player state updates to reject stale writes
-        ('stateVersion' in request.resource.data &&
-          request.resource.data.stateVersion is number &&
-          request.resource.data.stateVersion > resource.data.stateVersion)
-      );
-      allow delete: if isSignedIn() && (resource.data.hostId == request.auth.uid || resource.data.players.size() <= 1);
+      allow get: if isSignedIn() && isValidId(roomId);
+      allow list: if isSignedIn() && resource.data.status in ['waiting', 'full', 'playing', 'finished'];
+
+      allow create: if isSignedIn() &&
+        isValidId(roomId) &&
+        isValidGameRoom(incoming()) &&
+        incoming().hostId == request.auth.uid &&
+        incoming().status == 'waiting' &&
+        incoming().winnerId == null &&
+        incoming().players.size() == 1;
+
+      allow update: if isSignedIn() &&
+        isValidId(roomId) &&
+        isValidGameRoom(incoming()) &&
+        (incoming().status != 'playing' || existing().status == 'playing' || incoming().players.size() >= 2) &&
+        (incoming().status != 'finished' || existing().status == 'playing' || existing().status == 'finished') && (
+          // Isolated presence heartbeats
+          incoming().diff(existing()).affectedKeys().hasOnly(['presence']) ||
+          // Legacy room upgrade without stateVersion
+          !('stateVersion' in existing()) ||
+          // Strictly monotonic stateVersion on all room/turn/move transitions
+          ('stateVersion' in incoming() &&
+            incoming().stateVersion is number &&
+            incoming().stateVersion > existing().stateVersion)
+        );
+
+      allow delete: if isSignedIn() &&
+        isValidId(roomId) &&
+        (existing().hostId == request.auth.uid || existing().players.size() <= 1);
     }
 
-    // Transactions Ledger
+    // 3. Immutable Match Reward Claims (Idempotency + Server Outcome Verification)
+    match /reward_claims/{claimId} {
+      allow get: if isSignedIn() && isValidId(claimId) && (resource == null || resource.data.userId == request.auth.uid);
+      allow list: if false;
+      allow create: if isSignedIn() &&
+        isValidId(claimId) &&
+        isValidMatchRewardClaim(incoming()) &&
+        incoming().id == claimId &&
+        claimId == incoming().roomId + '_r' + string(incoming().gameRound) + '_' + request.auth.uid &&
+        exists(/databases/$(database)/documents/rooms/$(incoming().roomId)) &&
+        isServerVerifiedMatchReward(incoming());
+      allow update, delete: if false;
+    }
+
+    // 4. Immutable Daily Login Reward Claims
+    match /daily_claims/{dailyClaimId} {
+      allow get: if isSignedIn() && isValidId(dailyClaimId) && (resource == null || resource.data.userId == request.auth.uid);
+      allow list: if false;
+      allow create: if isSignedIn() &&
+        isValidId(dailyClaimId) &&
+        isValidDailyClaim(incoming()) &&
+        incoming().id == dailyClaimId &&
+        dailyClaimId == request.auth.uid + '_d' + string(incoming().dayBucket) &&
+        incoming().dayBucket >= (request.time.toMillis() / 86400000) - 1 &&
+        incoming().dayBucket <= (request.time.toMillis() / 86400000) + 1;
+      allow update, delete: if false;
+    }
+
+    // 5. Immutable Achievement Reward Claims
+    match /achievement_claims/{achClaimId} {
+      allow get: if isSignedIn() && isValidId(achClaimId) && (resource == null || resource.data.userId == request.auth.uid);
+      allow list: if false;
+      allow create: if isSignedIn() &&
+        isValidId(achClaimId) &&
+        isValidAchievementClaim(incoming()) &&
+        incoming().id == achClaimId &&
+        achClaimId == request.auth.uid + '_ach_' + incoming().achievementId &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        isServerVerifiedAchievementReward(incoming());
+      allow update, delete: if false;
+    }
+
+    // 6. Point & XP Transactions Ledger
     match /transactions/{txId} {
-      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
-      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow get: if isSignedIn() && isValidId(txId) && (resource == null || resource.data.userId == request.auth.uid);
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() &&
+        isValidId(txId) &&
+        isValidTransaction(incoming());
       allow update, delete: if false;
     }
   }

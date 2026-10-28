@@ -74,15 +74,26 @@ export const ShopView: React.FC = () => {
             </p>
           </div>
 
-          {/* User Points Display Chip */}
-          <div className="bg-white/95 border border-amber-300 rounded-2xl px-6 py-4 shadow-sm flex items-center gap-3 shrink-0">
-            <div className="w-12 h-12 rounded-xl bg-amber-100 border border-amber-300 flex items-center justify-center text-amber-600">
+          {/* User Spendable Points vs Total Points Earned Chip */}
+          <div className="bg-white/95 border border-amber-300 rounded-2xl px-5 py-3.5 shadow-sm flex items-center gap-3 shrink-0">
+            <div className="w-12 h-12 rounded-xl bg-amber-100 border border-amber-300 flex items-center justify-center text-amber-600 shrink-0">
               <Coins className="w-7 h-7" />
             </div>
             <div>
-              <div className="text-xs text-slate-500 font-semibold">သင့်လက်ကျန်ဒင်္ဂါး</div>
-              <div className="text-2xl font-black text-amber-700 font-mono">
-                {userProfile?.points.toLocaleString() || 0}
+              <div className="text-xs text-slate-500 font-semibold">သင့်လက်ကျန်ဒင်္ဂါး (Current)</div>
+              <div className="text-2xl font-black text-amber-700 font-mono tabular-nums">
+                {(userProfile?.currentPoints ?? userProfile?.points ?? 0).toLocaleString()}
+              </div>
+              <div className="text-[10px] text-slate-500 mt-0.5">
+                စုစုပေါင်းရမှတ်:{' '}
+                <strong className="font-mono text-slate-700">
+                  {(
+                    userProfile?.totalPointsEarned ??
+                    userProfile?.points ??
+                    0
+                  ).toLocaleString()}
+                </strong>{' '}
+                (Leaderboard မလျော့ပါ)
               </div>
             </div>
           </div>
@@ -141,7 +152,8 @@ export const ShopView: React.FC = () => {
             userProfile?.activeBoardSkin === item.id ||
             userProfile?.activeDiceSkin === item.id ||
             userProfile?.activeTokenSkin === item.id;
-          const canAfford = (userProfile?.points || 0) >= item.price;
+          const canAfford =
+            (userProfile?.currentPoints ?? userProfile?.points ?? 0) >= item.price;
 
           return (
             <div

@@ -1,12 +1,60 @@
+export type RewardSourceType =
+  | 'match_win'
+  | 'match_loss'
+  | 'daily_reward'
+  | 'achievement'
+  | 'mission'
+  | 'special_event'
+  | 'bonus';
+
+export interface RewardDefinition {
+  id: string;
+  source: RewardSourceType;
+  xp: number;
+  points: number;
+  descriptionMm: string;
+}
+
+export interface LevelProgressInfo {
+  level: number; // 1 to 999
+  totalXp: number; // Cumulative lifetime XP (continues increasing after Level 999)
+  currentLevelXp: number; // XP earned within the current level tier
+  xpForNextLevel: number; // 150 for Lv 1-100, 300 for Lv 101-998, 0 at Lv 999
+  xpRemainingForNextLevel: number; // Remaining XP needed to reach next level (0 at Lv 999)
+  progressPercent: number; // 0 to 100 (100 at Lv 999)
+  isMaxLevel: boolean; // true when level >= 999
+}
+
+export interface MatchRewardResult {
+  pointsEarned: number;
+  xpEarned: number;
+  previousLevel: number;
+  newLevel: number;
+  leveledUp: boolean;
+  levelsGained: number;
+  totalXp: number;
+  currentLevelXp: number;
+  xpForNextLevel: number;
+  xpRemainingForNextLevel: number;
+  progressPercent: number;
+  isMaxLevel: boolean;
+  currentPoints: number;
+  totalPointsEarned: number;
+  alreadyClaimed: boolean;
+}
+
 export interface UserProfile {
   id: string; // Auth UID
   playerId: string; // Unique player ID e.g. "SG-729481"
   displayName: string;
   email: string;
   photoURL: string;
-  level: number;
-  xp: number;
-  points: number;
+  level: number; // 1 to 999
+  xp: number; // Current level XP progress (synced with totalXp)
+  totalXp?: number; // Cumulative lifetime XP (authoritative for Level & Level Leaderboard tie-break)
+  points: number; // Spendable current point balance (synced with currentPoints)
+  currentPoints?: number; // Spendable current point balance (reduced only by Shop purchases)
+  totalPointsEarned?: number; // Cumulative lifetime points earned (never reduced by Shop purchases)
   totalWins: number;
   totalGames: number;
   activeFrame: string;
@@ -14,8 +62,23 @@ export interface UserProfile {
   activeDiceSkin: string;
   activeTokenSkin: string;
   inventory: string[]; // List of owned item IDs
+  claimedAchievements?: string[]; // Claimed achievement IDs
+  lastClaimId?: string | null; // Last verified atomic match reward claim ID
+  lastDailyClaimId?: string | null; // Last verified atomic daily reward claim ID
+  lastAchievementClaimId?: string | null; // Last verified atomic achievement claim ID
+  activeRoomId?: string | null; // Active multiplayer room session for recovery
+  activeRoomCode?: string | null;
+  activeGameType?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ActiveGameSession {
+  uid: string;
+  roomId: string;
+  roomCode: string;
+  gameType: string;
+  savedAt: number;
 }
 
 export interface Achievement {
@@ -88,6 +151,7 @@ export interface GameRoom {
   lastMoveSummary: string;
   winnerId: string | null;
   winnerName: string | null;
+  matchParticipantIds?: string[]; // Snapshot of participating UIDs when match reaches finished
   exactFinish: boolean;
   // Version Control & Atomic Synchronization
   stateVersion?: number; // Monotonically incremented on every authoritative state write
@@ -118,8 +182,18 @@ export interface JoinRoomResult {
 export interface PointTransaction {
   id: string;
   userId: string;
-  type: 'welcome_bonus' | 'win_reward' | 'play_reward' | 'shop_purchase' | 'daily_reward';
+  type:
+    | 'welcome_bonus'
+    | 'win_reward'
+    | 'play_reward'
+    | 'shop_purchase'
+    | 'daily_reward'
+    | 'achievement_reward'
+    | 'mission_reward'
+    | 'event_reward'
+    | 'bonus_reward';
   amount: number;
+  xpAmount?: number;
   description: string;
   createdAt: string;
 }

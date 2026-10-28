@@ -1,31 +1,31 @@
 import { ShopItem, Achievement } from '../types';
+import { LEVEL_SYSTEM_CONFIG, REWARD_CONFIG } from './rewardConfig';
+import { getXpRequiredForNextLevel } from '../services/progressionService';
 
 /**
  * Game Configuration System
- * အမှတ်ပေးစနစ် (Point System) နှင့် Level Requirement များကို
- * နောက်ပိုင်းတွင် လွယ်ကူစွာ ပြင်ဆင်နိုင်ရန် စုစည်းထားသော Configuration ဖြစ်ပါသည်။
+ * Reward values & Level curve delegate directly to centralized `rewardConfig.ts`
+ * so all rewards across the platform come from a single source of truth.
  */
 export const GAME_CONFIG = {
-  // Point Rewards (အမှတ်ဆုကြေးများ)
-  INITIAL_WELCOME_POINTS: 500, // ပထမဆုံးအကောင့်ဖွင့်သူအတွက် ကြိုဆိုဆု
-  INITIAL_WELCOME_XP: 100,
+  // Centralized Point & XP Rewards (delegated to REWARD_CONFIG)
+  INITIAL_WELCOME_POINTS: REWARD_CONFIG.WELCOME_BONUS.points,
+  INITIAL_WELCOME_XP: REWARD_CONFIG.WELCOME_BONUS.xp,
 
-  WIN_REWARD_POINTS: 150,      // Game အနိုင်ရသူ ရရှိမည့် အမှတ်
-  WIN_REWARD_XP: 250,          // Game အနိုင်ရသူ ရရှိမည့် XP
+  WIN_REWARD_POINTS: REWARD_CONFIG.MATCH_WIN.points, // +1,000 Points
+  WIN_REWARD_XP: REWARD_CONFIG.MATCH_WIN.xp, // +100 XP
 
-  PARTICIPATION_POINTS: 30,    // အနိုင်မရသော်လည်း ပါဝင်ကစားသူ ရရှိမည့် အမှတ်
-  PARTICIPATION_XP: 50,        // ပါဝင်ကစားသူ ရရှိမည့် XP
+  PARTICIPATION_POINTS: REWARD_CONFIG.MATCH_LOSS.points, // +500 Points
+  PARTICIPATION_XP: REWARD_CONFIG.MATCH_LOSS.xp, // +75 XP
 
-  DAILY_REWARD_POINTS: 100,    // နေ့စဉ် Login ဆုကြေး အမှတ်
-  DAILY_REWARD_XP: 80,
+  DAILY_REWARD_POINTS: REWARD_CONFIG.DAILY_REWARD.points,
+  DAILY_REWARD_XP: REWARD_CONFIG.DAILY_REWARD.xp,
 
-  // Level Progression Formula: XP needed for next level = BASE_XP * (level ^ LEVEL_EXPONENT)
-  BASE_XP_PER_LEVEL: 300,
-  LEVEL_EXPONENT: 1.25,
+  MAX_LEVEL: LEVEL_SYSTEM_CONFIG.MAX_LEVEL, // 999
 
-  // Helper function to calculate required XP for a given level
+  // Helper function returning required XP for advancing from `level` to `level + 1`
   getXpForLevel(level: number): number {
-    return Math.floor(this.BASE_XP_PER_LEVEL * Math.pow(level, this.LEVEL_EXPONENT));
+    return getXpRequiredForNextLevel(level);
   },
 
   // Token Colors for players in room
@@ -193,8 +193,8 @@ export const ACHIEVEMENTS_LIST: Achievement[] = [
     description: 'မည်သည့် မီနီဂိမ်းတွင်မဆို ပထမဆုံးအကြိမ် အနိုင်ရရှိခြင်း',
     icon: 'Trophy',
     targetCount: 1,
-    rewardPoints: 100,
-    rewardXp: 150,
+    rewardPoints: REWARD_CONFIG.ACHIEVEMENTS.first_win.points,
+    rewardXp: REWARD_CONFIG.ACHIEVEMENTS.first_win.xp,
   },
   {
     id: 'win_5',
@@ -202,8 +202,8 @@ export const ACHIEVEMENTS_LIST: Achievement[] = [
     description: 'စုစုပေါင်း ပွဲ ၅ ပွဲ အနိုင်ရရှိခြင်း',
     icon: 'Award',
     targetCount: 5,
-    rewardPoints: 300,
-    rewardXp: 400,
+    rewardPoints: REWARD_CONFIG.ACHIEVEMENTS.win_5.points,
+    rewardXp: REWARD_CONFIG.ACHIEVEMENTS.win_5.xp,
   },
   {
     id: 'games_10',
@@ -211,8 +211,8 @@ export const ACHIEVEMENTS_LIST: Achievement[] = [
     description: 'စုစုပေါင်း ဂိမ်း ၁၀ ပွဲ ပါဝင်ကစားပြီးခြင်း',
     icon: 'Gamepad2',
     targetCount: 10,
-    rewardPoints: 200,
-    rewardXp: 300,
+    rewardPoints: REWARD_CONFIG.ACHIEVEMENTS.games_10.points,
+    rewardXp: REWARD_CONFIG.ACHIEVEMENTS.games_10.xp,
   },
   {
     id: 'reach_lvl_5',
@@ -220,7 +220,7 @@ export const ACHIEVEMENTS_LIST: Achievement[] = [
     description: 'ကစားသမား Level 5 သို့ ရောက်ရှိခြင်း',
     icon: 'Flame',
     targetCount: 5,
-    rewardPoints: 500,
-    rewardXp: 500,
+    rewardPoints: REWARD_CONFIG.ACHIEVEMENTS.reach_lvl_5.points,
+    rewardXp: REWARD_CONFIG.ACHIEVEMENTS.reach_lvl_5.xp,
   },
 ];

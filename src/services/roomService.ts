@@ -16,6 +16,7 @@ import {
   UserProfile,
 } from '../types';
 import { GAME_CONFIG } from '../config/gameRules';
+import { markGameSessionExited, saveActiveGameSession } from './gameSessionService';
 
 export type RoomJoinErrorCode =
   | 'INVALID_CODE'
@@ -327,6 +328,7 @@ export async function createGameRoom(
     lastMoveSummary: `${hostUser.displayName} မှ အခန်းဖန်တီးထားပါသည်။`,
     winnerId: null,
     winnerName: null,
+    matchParticipantIds: [],
     exactFinish,
     stateVersion: 1,
     gameRound: 1,
@@ -351,6 +353,7 @@ export async function createGameRoom(
       timestamp: serverTimestamp(),
       serverUpdatedAt: serverTimestamp(),
     });
+    await saveActiveGameSession(effectiveHostUid, roomId, roomCode, newRoom.gameType, true);
     return {
       roomId,
       room: newRoom,
@@ -631,7 +634,15 @@ export async function joinGameRoomByCode(
 
   inFlightJoins.set(inFlightKey, joinPromise);
   try {
-    return await joinPromise;
+    const result = await joinPromise;
+    await saveActiveGameSession(
+      effectiveUid,
+      result.roomId,
+      result.room.roomCode,
+      result.room.gameType || 'snakes_and_ladders',
+      true
+    );
+    return result;
   } finally {
     inFlightJoins.delete(inFlightKey);
   }
@@ -942,6 +953,9 @@ export async function startGame(roomId: string) {
         lastMoveId: null,
         lastMovePath: [],
         lastMovingPlayerUid: null,
+        winnerId: null,
+        winnerName: null,
+        matchParticipantIds: resetStartPlayers.map((p) => p.uid),
         gameRound: (room.gameRound || 1) + 1,
         stateVersion: (room.stateVersion || 1) + 1,
         lastMoveSummary: 'ဂိမ်းစတင်ပါပြီ! ပထမဆုံး ကစားသမား အံစာတုံး စတင်ခေါက်ပါ!',
@@ -959,6 +973,9 @@ export async function startGame(roomId: string) {
  * and freeing room capacity from 'full' back to 'waiting' when in lobby)
  */
 export async function leaveGameRoom(roomId: string, userId: string) {
+  // Immediately mark room session as exited so browser refresh never re-enters this room
+  await markGameSessionExited(userId, roomId, false);
+
   const roomRef = doc(db, 'rooms', roomId);
   try {
     await runTransaction(db, async (transaction) => {
@@ -969,6 +986,12 @@ export async function leaveGameRoom(roomId: string, userId: string) {
       const maxPlayers = normalizeMaxPlayers(room.maxPlayers);
 
       const uniquePlayers = deduplicateRoomPlayers(room.players, room.playerPositions, txNow);
+      const leavingIndex = uniquePlayers.findIndex((p) => p.uid === userId);
+      if (leavingIndex < 0) {
+        return;
+      }
+
+      const leavingPlayer = uniquePlayers[leavingIndex];
       const remainingPlayers = uniquePlayers.filter((p) => p.uid !== userId);
 
       if (remainingPlayers.length === 0) {
@@ -986,17 +1009,65 @@ export async function leaveGameRoom(roomId: string, userId: string) {
       }
 
       let nextTurn = room.currentTurnIndex;
-      if (nextTurn >= remainingPlayers.length) {
+      let nextTurnStart = room.turnStartTimestamp || txNow;
+      let nextTurnDeadline = room.turnDeadline || 0;
+      let nextStatus: RoomStatus = room.status;
+      let nextWinnerId = room.winnerId;
+      let nextWinnerName = room.winnerName;
+      let nextMatchParticipants: string[] = Array.isArray(room.matchParticipantIds)
+        ? room.matchParticipantIds
+        : [];
+      let nextSummary = `${leavingPlayer.displayName} အခန်းမှ ထွက်ခွာသွားပါသည်။`;
+
+      if (room.status === 'playing') {
+        if (remainingPlayers.length === 1) {
+          // Sole remaining player wins by opponent exit so their match finishes cleanly
+          const soleWinner = sanitizePlayer(remainingPlayers[0], txNow, { rank: 1 });
+          remainingPlayers[0] = soleWinner;
+          nextStatus = 'finished';
+          nextWinnerId = soleWinner.uid;
+          nextWinnerName = soleWinner.displayName;
+          nextMatchParticipants = [soleWinner.uid];
+          nextTurn = 0;
+          nextTurnStart = txNow;
+          nextTurnDeadline = 0;
+          nextSummary = `🏆 ${leavingPlayer.displayName} ဂိမ်းမှ ထွက်ခွာသွားသဖြင့် ${soleWinner.displayName} အနိုင်ရရှိသွားပါသည်!`;
+        } else {
+          // 2+ players remain in active match: preserve exact turn order & positions
+          nextStatus = 'playing';
+          nextMatchParticipants = remainingPlayers.map((p) => p.uid);
+          if (leavingIndex < room.currentTurnIndex) {
+            nextTurn = Math.max(0, room.currentTurnIndex - 1);
+          } else if (leavingIndex === room.currentTurnIndex) {
+            nextTurn = room.currentTurnIndex % remainingPlayers.length;
+            nextTurnStart = txNow;
+            nextTurnDeadline = txNow + 30000;
+          } else {
+            nextTurn = Math.min(room.currentTurnIndex, remainingPlayers.length - 1);
+          }
+          if (!nextTurnDeadline || nextTurnDeadline <= txNow) {
+            nextTurnStart = txNow;
+            nextTurnDeadline = txNow + 30000;
+          }
+        }
+      } else if (room.status === 'waiting' || room.status === 'full') {
+        nextStatus = computeLobbyStatus(remainingPlayers.length, maxPlayers);
         nextTurn = 0;
+        nextTurnStart = 0;
+        nextTurnDeadline = 0;
+        nextMatchParticipants = [];
+      } else {
+        // 'finished' - preserve existing matchParticipantIds so remaining participants can claim rewards
+        nextStatus = 'finished';
+        if (nextMatchParticipants.length === 0) {
+          nextMatchParticipants = uniquePlayers.map((p) => p.uid);
+        }
+        if (nextTurn >= remainingPlayers.length) {
+          nextTurn = 0;
+        }
       }
 
-      // If in pre-game lobby ('waiting' or 'full'), dynamically recalculate capacity status
-      const nextStatus: RoomStatus =
-        room.status === 'playing' || room.status === 'finished'
-          ? room.status
-          : computeLobbyStatus(remainingPlayers.length, maxPlayers);
-
-      transaction.update(roomRef, {
+      const updates: Record<string, any> = {
         players: remainingPlayers,
         playerCount: remainingPlayers.length,
         status: nextStatus,
@@ -1004,16 +1075,30 @@ export async function leaveGameRoom(roomId: string, userId: string) {
         hostId: newHostId,
         hostName: newHostName,
         currentTurnIndex: nextTurn,
-        turnStartTimestamp: txNow,
-        turnDeadline: txNow + 30000,
+        turnStartTimestamp: nextTurnStart,
+        turnDeadline: nextTurnDeadline,
+        winnerId: nextWinnerId,
+        winnerName: nextWinnerName,
+        matchParticipantIds: nextMatchParticipants,
         stateVersion: (room.stateVersion || 1) + 1,
-        lastMoveSummary: `ကစားသမားတစ်ဦး အခန်းမှ ထွက်ခွာသွားပါသည်။`,
+        lastMoveSummary: nextSummary,
         updatedAt: new Date(txNow).toISOString(),
         serverUpdatedAt: serverTimestamp(),
-      });
+      };
+
+      if (room.disconnectedPlayerId === userId) {
+        updates.disconnectedPlayerId = null;
+        updates.disconnectedPlayerName = null;
+        updates.reconnectionDeadline = null;
+      }
+
+      transaction.update(roomRef, updates);
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `rooms/${roomId}`);
+  } finally {
+    // Clear activeRoomId on user profile in Firestore (non-blocking)
+    await markGameSessionExited(userId, roomId, true);
   }
 }
 
@@ -1197,6 +1282,7 @@ export async function executeDiceRollAndMove(
         status: won ? 'finished' : 'playing',
         winnerId: won ? currentPlayer.uid : null,
         winnerName: won ? currentPlayer.displayName : null,
+        matchParticipantIds: updatedPlayers.map((p) => p.uid),
         updatedAt: new Date(txNow).toISOString(),
         serverUpdatedAt: serverTimestamp(),
       });
@@ -1272,6 +1358,7 @@ export async function resetRoomToPlayAgain(roomId: string) {
         lastMoveSummary: 'ဂိမ်းအသစ် ပြန်လည်စတင်ရန် အဆင်သင့်ဖြစ်ပါပြီ!',
         winnerId: null,
         winnerName: null,
+        matchParticipantIds: [],
         lastMoveTimestamp: txNow,
         updatedAt: new Date(txNow).toISOString(),
         serverUpdatedAt: serverTimestamp(),

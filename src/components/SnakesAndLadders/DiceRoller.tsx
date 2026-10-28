@@ -208,13 +208,13 @@ export const DiceRoller: React.FC<DiceRollerProps> = ({
   const isLowTime = secondsLeft <= 8;
 
   return (
-    <div className="w-full bg-white border border-slate-200/90 rounded-2xl p-4 shadow-xs backdrop-blur-md">
-      <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+    <div className="w-full bg-white border border-slate-200/90 rounded-2xl p-3 sm:p-4 shadow-xs backdrop-blur-md">
+      <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 sm:gap-4">
         {/* Left: Active Player Banner & Turn indicator */}
-        <div className="flex items-center gap-3 w-full md:w-auto">
-          <div className="relative">
+        <div className="flex items-center gap-3 min-w-0 w-full md:w-auto">
+          <div className="relative shrink-0">
             <div
-              className="w-12 h-12 rounded-full border-2 border-white shadow-md flex items-center justify-center overflow-hidden"
+              className="w-10 h-10 sm:w-12 sm:h-12 rounded-full border-2 border-white shadow-md flex items-center justify-center overflow-hidden"
               style={{ backgroundColor: currentTurnPlayer?.color || '#3B82F6' }}
             >
               {currentTurnPlayer?.photoURL ? (
@@ -224,20 +224,20 @@ export const DiceRoller: React.FC<DiceRollerProps> = ({
                   className="w-full h-full object-cover"
                 />
               ) : (
-                <User className="w-6 h-6 text-white" />
+                <User className="w-5 h-5 sm:w-6 sm:h-6 text-white" />
               )}
             </div>
             {isMyTurn && (
-              <span className="absolute -top-1 -right-1 w-4 h-4 bg-emerald-500 rounded-full border-2 border-white animate-ping" />
+              <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 bg-emerald-500 rounded-full border-2 border-white animate-ping" />
             )}
           </div>
 
-          <div>
-            <div className="text-xs font-semibold text-slate-500 flex items-center gap-2">
-              <span>လက်ရှိအလှည့်</span>
-              {/* 30s Countdown Badge */}
+          <div className="min-w-0 flex-1">
+            <div className="text-[11px] sm:text-xs font-semibold text-slate-500 flex items-center justify-between sm:justify-start gap-2">
+              <span className="whitespace-nowrap">လက်ရှိအလှည့်</span>
+              {/* 30s Countdown Timer */}
               <div
-                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-mono font-bold transition-colors ${
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-mono tabular-nums font-bold transition-colors whitespace-nowrap shrink-0 ${
                   isLowTime
                     ? 'bg-rose-100 text-rose-800 border border-rose-300 animate-pulse'
                     : 'bg-amber-100 text-amber-900 border border-amber-300'
@@ -248,48 +248,55 @@ export const DiceRoller: React.FC<DiceRollerProps> = ({
               </div>
             </div>
 
-            <div className="text-base font-bold text-slate-900 flex items-center gap-2 mt-0.5">
-              <span>{currentTurnPlayer?.displayName || 'ကစားသမား'}</span>
+            <div className="text-sm sm:text-base font-bold text-slate-900 flex items-center gap-2 mt-0.5 min-w-0">
+              <span className="truncate max-w-[130px] sm:max-w-[180px]">
+                {currentTurnPlayer?.displayName || 'ကစားသမား'}
+              </span>
               {isMyTurn ? (
-                <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-400 text-slate-950 font-black shadow-xs">
-                  သင့်အလှည့်ဖြစ်ပါသည်
+                <span className="text-[10px] sm:text-[11px] px-2 py-0.5 rounded-lg bg-amber-400 text-slate-950 font-black whitespace-nowrap shrink-0">
+                  သင့်အလှည့်
                 </span>
               ) : (
-                <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200">
-                  {currentTurnPlayer?.displayName} ခေါက်နေဆဲ
+                <span className="text-[10px] sm:text-[11px] px-2 py-0.5 rounded-lg bg-slate-100 text-slate-600 border border-slate-200 whitespace-nowrap shrink-0">
+                  စောင့်ဆိုင်းဆဲ
                 </span>
               )}
             </div>
 
-            <div className="text-xs text-slate-500">
-              လက်ရှိနေရာ: <span className="text-amber-700 font-bold">အကွက် {currentTurnPlayer?.position || 1}</span> / ၁၀၀
+            <div className="text-[11px] sm:text-xs text-slate-500 tabular-nums">
+              လက်ရှိနေရာ:{' '}
+              <span className="text-amber-700 font-bold">
+                အကွက် {currentTurnPlayer?.position || 1}
+              </span>{' '}
+              / ၁၀၀
             </div>
           </div>
         </div>
 
-        {/* Center: 3D Dice Display & Roll Action Button */}
-        <div className="flex items-center gap-4 w-full md:w-auto justify-center">
+        {/* Right/Bottom: 3D Dice Display & Thumb-Friendly Roll Action Button */}
+        <div className="flex items-center gap-3 sm:gap-4 w-full md:w-auto justify-between md:justify-center">
           {/* 3D Dice Box */}
           <div
-            className={`w-16 h-16 rounded-xl flex items-center justify-center transform transition-transform duration-200 select-none ${getDiceSkinStyle()} ${
-              isRolling ? 'rotate-180 scale-110' : 'hover:scale-105'
+            className={`w-14 h-14 sm:w-16 sm:h-16 shrink-0 rounded-xl flex items-center justify-center transform transition-transform duration-200 select-none ${getDiceSkinStyle()} ${
+              isRolling ? 'rotate-180 scale-105' : ''
             }`}
           >
             {renderDots(displayRoll)}
           </div>
 
-          {/* Roll Button */}
+          {/* Roll Button (Minimum 48px touch hitbox on mobile) */}
           <button
+            type="button"
             onClick={handleRollClick}
             disabled={!isMyTurn || isRolling || disabled}
-            className={`px-6 py-3.5 rounded-xl font-black text-sm md:text-base flex items-center gap-2 transition-all duration-200 ${
+            className={`flex-1 md:flex-initial min-h-[48px] px-4 sm:px-6 py-3 rounded-xl font-black text-xs sm:text-sm md:text-base flex items-center justify-center gap-2 transition-all duration-150 ${
               isMyTurn && !isRolling && !disabled
-                ? 'bg-amber-400 hover:bg-amber-500 text-slate-950 shadow-sm hover:scale-105 cursor-pointer active:scale-95 animate-pulse'
+                ? 'bg-amber-400 hover:bg-amber-500 text-slate-950 shadow-sm active:scale-[0.98] cursor-pointer'
                 : 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200'
             }`}
           >
-            <Dices className={`w-5 h-5 ${isRolling ? 'animate-spin' : ''}`} />
-            <span>
+            <Dices className={`w-5 h-5 shrink-0 ${isRolling ? 'animate-spin' : ''}`} />
+            <span className="truncate tabular-nums">
               {isRolling
                 ? 'အံစာတုံး လှည့်နေသည်...'
                 : isMyTurn
@@ -301,9 +308,11 @@ export const DiceRoller: React.FC<DiceRollerProps> = ({
       </div>
 
       {/* Live Event Announcer Banner */}
-      <div className="mt-3 pt-3 border-t border-slate-100 flex items-center gap-2 text-xs md:text-sm text-slate-600">
-        <Sparkles className="w-4 h-4 text-amber-500 shrink-0" />
-        <span className="truncate">{lastMoveSummary || 'ဂိမ်းစတင်ရန် အံစာတုံးခေါက်ပါ'}</span>
+      <div className="mt-2.5 pt-2.5 border-t border-slate-100 flex items-center gap-2 text-xs text-slate-600">
+        <Sparkles className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+        <span className="line-clamp-2 sm:truncate leading-snug">
+          {lastMoveSummary || 'ဂိမ်းစတင်ရန် အံစာတုံးခေါက်ပါ'}
+        </span>
       </div>
     </div>
   );

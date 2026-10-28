@@ -331,9 +331,9 @@ export const GameBoard: React.FC<GameBoardProps> = ({
   };
 
   return (
-    <div className="w-full flex justify-center items-center select-none py-2">
-      {/* Aspect Ratio Box 1:1 for crisp square board */}
-      <div className="w-full max-w-[620px] aspect-square relative rounded-2xl p-1.5 md:p-2 border-4 border-amber-300/80 bg-white shadow-md transition-all duration-300">
+    <div className="w-full flex justify-center items-center select-none py-0.5 sm:py-1.5">
+      {/* Aspect Ratio Box 1:1 scaled cleanly for iPhone 11, Android & Desktop */}
+      <div className="w-full max-w-[min(100%,calc(100dvh-250px))] sm:max-w-[min(100%,calc(100dvh-255px))] md:max-w-[580px] lg:max-w-[600px] min-w-[260px] aspect-square relative rounded-2xl p-1 sm:p-1.5 md:p-2 border-3 sm:border-4 border-amber-300/80 bg-white shadow-md transition-all duration-300">
         <div className={`w-full h-full relative rounded-xl border overflow-hidden ${boardThemeClass}`}>
           {/* 10x10 Grid */}
           <div className="grid grid-cols-10 grid-rows-10 w-full h-full gap-0.5 p-0.5">

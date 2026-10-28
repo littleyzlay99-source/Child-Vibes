@@ -270,23 +270,30 @@ export const HomeView: React.FC<HomeViewProps> = ({
         </div>
 
         <div className="bg-white border border-slate-200/80 rounded-2xl p-4 flex items-center gap-3 shadow-xs">
-          <div className="w-10 h-10 rounded-xl bg-sky-50 border border-sky-200 flex items-center justify-center text-sky-600">
+          <div className="w-10 h-10 rounded-xl bg-sky-50 border border-sky-200 flex items-center justify-center text-sky-600 shrink-0">
             <Shield className="w-5 h-5" />
           </div>
           <div>
             <div className="text-[11px] text-slate-500">သင်၏ Level</div>
-            <div className="text-lg font-black text-slate-800">Level {userProfile?.level || 1}</div>
+            <div className="text-lg font-black text-slate-800 flex items-center gap-1.5">
+              <span>Level {userProfile?.level || 1}</span>
+              {(userProfile?.level || 1) >= 999 && (
+                <span className="px-1.5 py-0.5 rounded bg-slate-900 text-amber-300 text-[9px] font-black">
+                  MAX
+                </span>
+              )}
+            </div>
           </div>
         </div>
 
         <div className="bg-white border border-slate-200/80 rounded-2xl p-4 flex items-center gap-3 shadow-xs">
-          <div className="w-10 h-10 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600">
+          <div className="w-10 h-10 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600 shrink-0">
             <Sparkles className="w-5 h-5" />
           </div>
           <div>
             <div className="text-[11px] text-slate-500">ရွှေဒင်္ဂါး လက်ကျန်</div>
-            <div className="text-lg font-black text-amber-700 font-mono">
-              {userProfile?.points.toLocaleString() || 0}
+            <div className="text-lg font-black text-amber-700 font-mono tabular-nums">
+              {(userProfile?.currentPoints ?? userProfile?.points ?? 0).toLocaleString()}
             </div>
           </div>
         </div>

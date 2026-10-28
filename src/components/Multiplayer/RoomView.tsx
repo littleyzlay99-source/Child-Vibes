@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
-import { GameRoom, RoomPlayer } from '../../types';
+import { GameRoom, MatchRewardResult, RoomPlayer, RoomStatus } from '../../types';
 import { useAuth } from '../../contexts/AuthContext';
+import { deriveLevelProgress } from '../../services/progressionService';
 import {
   togglePlayerReady,
   startGame,
@@ -17,6 +18,8 @@ import {
   deduplicateRoomPlayers,
   normalizeMaxPlayers,
 } from '../../services/roomService';
+import { saveActiveGameSession } from '../../services/gameSessionService';
+import { useGameShell } from '../GameShell/GameShell';
 import { GameBoard } from '../SnakesAndLadders/GameBoard';
 import { DiceRoller } from '../SnakesAndLadders/DiceRoller';
 import { VictoryModal } from '../SnakesAndLadders/VictoryModal';
@@ -31,16 +34,22 @@ import {
   Crown,
   ShieldCheck,
   Clock,
-  Sparkles,
   Info,
   WifiOff,
   AlertTriangle,
 } from 'lucide-react';
 
+export interface RoomMetaSummary {
+  roomCode: string;
+  gameType: string;
+  status: RoomStatus;
+}
+
 interface RoomViewProps {
   roomId: string;
   initialRoom?: GameRoom | null;
   onExitRoom: () => void;
+  onRoomMetaChange?: (meta: RoomMetaSummary) => void;
 }
 
 interface ConfirmedPlayerState {
@@ -50,8 +59,14 @@ interface ConfirmedPlayerState {
   updatedAtMs: number;
 }
 
-export const RoomView: React.FC<RoomViewProps> = ({ roomId, initialRoom, onExitRoom }) => {
-  const { currentUser, userProfile, recordGameOutcome } = useAuth();
+export const RoomView: React.FC<RoomViewProps> = ({
+  roomId,
+  initialRoom,
+  onExitRoom,
+  onRoomMetaChange,
+}) => {
+  const { currentUser, userProfile, claimRoomMatchReward } = useAuth();
+  const { requestExit, isExiting } = useGameShell();
   const seededRoom = initialRoom && initialRoom.id === roomId ? initialRoom : null;
   const [room, setRoom] = useState<GameRoom | null>(seededRoom);
   const [loading, setLoading] = useState<boolean>(!seededRoom);
@@ -61,9 +76,13 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, initialRoom, onExitR
   const [actionInProgress, setActionInProgress] = useState(false);
   const [gameErrorNotice, setGameErrorNotice] = useState<string | null>(null);
   const [reconnectCountdown, setReconnectCountdown] = useState<number>(60);
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
 
   const actionLockRef = useRef<boolean>(false);
   const onExitRoomRef = useRef(onExitRoom);
+  const onRoomMetaChangeRef = useRef(onRoomMetaChange);
   const currentUidRef = useRef<string | undefined>(currentUser?.uid);
 
   // Authoritative version tracker across snapshots to reject stale/out-of-order positions
@@ -82,16 +101,37 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, initialRoom, onExitR
   }, [onExitRoom]);
 
   useEffect(() => {
+    onRoomMetaChangeRef.current = onRoomMetaChange;
+  }, [onRoomMetaChange]);
+
+  useEffect(() => {
     currentUidRef.current = currentUser?.uid;
   }, [currentUser?.uid]);
 
-  // Rewards state for end-game modal
-  const [rewardOutcome, setRewardOutcome] = useState<{
-    pointsEarned: number;
-    xpEarned: number;
-    leveledUp: boolean;
-    newLevel: number;
-  } | null>(null);
+  // Synchronize live room metadata to GameShell & local session cache (zero extra Firestore writes)
+  useEffect(() => {
+    if (!room) return;
+    onRoomMetaChangeRef.current?.({
+      roomCode: room.roomCode,
+      gameType: room.gameType || 'snakes_and_ladders',
+      status: room.status,
+    });
+    if (currentUser?.uid && room.status !== 'finished') {
+      saveActiveGameSession(
+        currentUser.uid,
+        roomId,
+        room.roomCode,
+        room.gameType || 'snakes_and_ladders',
+        false
+      );
+    }
+  }, [room?.roomCode, room?.gameType, room?.status, currentUser?.uid, roomId]);
+
+  // Rewards state for end-game modal (idempotent per roomId + gameRound)
+  const [rewardOutcome, setRewardOutcome] = useState<MatchRewardResult | null>(null);
+  const [isClaimingReward, setIsClaimingReward] = useState<boolean>(false);
+  const claimedRoundKeyRef = useRef<string | null>(null);
+  const activeClaimPromiseRef = useRef<Promise<MatchRewardResult> | null>(null);
 
   // Single stable real-time room listener per roomId with strict version reconciliation
   useEffect(() => {
@@ -261,35 +301,51 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, initialRoom, onExitR
     };
   }, [roomId]);
 
-  // Isolated Player Presence & Heartbeat (every 12 seconds) + Reconnection check
+  // Isolated Player Presence & Heartbeat + Mobile Tab Switch / Screen Lock / Network Recovery
   useEffect(() => {
     const uid = currentUser?.uid;
     if (!uid || !roomId) return;
 
     // Initial reconnect check
-    reconnectPlayerToRoom(roomId, uid);
+    if (navigator.onLine) {
+      reconnectPlayerToRoom(roomId, uid);
+    }
 
     const heartbeatInterval = setInterval(() => {
-      if (navigator.onLine) {
+      if (navigator.onLine && document.visibilityState === 'visible') {
         updatePlayerPresence(roomId, uid);
       }
     }, 12000);
 
     const handleOnline = () => {
+      setIsOnline(true);
       reconnectPlayerToRoom(roomId, uid);
     };
 
     const handleOffline = () => {
+      setIsOnline(false);
       markPlayerDisconnected(roomId, uid);
+    };
+
+    // Recover seamlessly when returning from mobile screen lock, app switcher, or another browser tab
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible' && navigator.onLine) {
+        setIsOnline(true);
+        reconnectPlayerToRoom(roomId, uid);
+      }
     };
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+    window.addEventListener('focus', handleVisibilityOrFocus);
 
     return () => {
       clearInterval(heartbeatInterval);
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
     };
   }, [roomId, currentUser?.uid]);
 
@@ -310,25 +366,55 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, initialRoom, onExitR
     return () => clearInterval(interval);
   }, [room?.reconnectionDeadline, roomId]);
 
-  // When game finishes, award points and XP to the players
+  // When game finishes, idempotently claim server-verified XP & Points once per match round
   useEffect(() => {
-    if (room && room.status === 'finished' && room.winnerId && !rewardOutcome) {
-      const isWinner = room.winnerId === currentUser?.uid;
-      recordGameOutcome(isWinner).then((result) => {
-        setRewardOutcome(result);
-      });
-    }
-    if (room && room.status !== 'finished') {
+    if (!room || !currentUser?.uid) return;
+
+    if (room.status === 'finished' && room.winnerId) {
+      const roundKey = `${roomId}_r${room.gameRound || 1}_${currentUser.uid}`;
+      if (claimedRoundKeyRef.current === roundKey) {
+        return;
+      }
+      claimedRoundKeyRef.current = roundKey;
+      setIsClaimingReward(true);
+
+      const claimPromise = claimRoomMatchReward(roomId, room.gameRound);
+      activeClaimPromiseRef.current = claimPromise;
+
+      claimPromise
+        .then((result) => {
+          setRewardOutcome(result);
+        })
+        .catch((err) => {
+          console.error('Match reward claim error:', err);
+          // Allow retry if transient network disconnect occurred
+          claimedRoundKeyRef.current = null;
+        })
+        .finally(() => {
+          if (activeClaimPromiseRef.current === claimPromise) {
+            activeClaimPromiseRef.current = null;
+          }
+          setIsClaimingReward(false);
+        });
+    } else if (room.status !== 'finished') {
+      claimedRoundKeyRef.current = null;
       setRewardOutcome(null);
+      setIsClaimingReward(false);
     }
-  }, [room?.status, room?.winnerId, currentUser?.uid]);
+  }, [room?.status, room?.winnerId, room?.gameRound, currentUser?.uid, roomId, claimRoomMatchReward]);
 
   if (loading || !room) {
     return (
-      <div className="min-h-[500px] flex flex-col items-center justify-center p-6 text-center">
+      <div className="min-h-[420px] flex flex-col items-center justify-center p-6 text-center">
         <div className="w-12 h-12 border-4 border-amber-500 border-t-transparent rounded-full animate-spin mb-4" />
-        <div className="text-slate-800 font-bold text-lg">အခန်းချိတ်ဆက်နေပါသည်...</div>
-        <div className="text-slate-500 text-sm mt-1">ကျေးဇူးပြု၍ ခဏစောင့်ဆိုင်းပေးပါ</div>
+        <div className="text-slate-800 font-bold text-lg">
+          {isOnline ? 'အခန်းချိတ်ဆက်နေပါသည်...' : 'အင်တာနက်လိုင်း ပြန်လည်ချိတ်ဆက်ရန် စောင့်ဆိုင်းနေပါသည်...'}
+        </div>
+        <div className="text-slate-500 text-xs sm:text-sm mt-1">
+          {isOnline
+            ? 'သင်၏ ကစားလက်စ ဂိမ်းအခန်းကို ပြန်လည်ရယူနေပါသည်'
+            : 'လိုင်းပြန်မိသည်နှင့် ဂိမ်းအခန်းအတွင်းသို့ အလိုအလျောက် ပြန်ဝင်ပါမည်'}
+        </div>
       </div>
     );
   }
@@ -370,9 +456,16 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, initialRoom, onExitR
     await startGame(roomId);
   };
 
-  const handleLeaveRoom = async () => {
-    if (!currentUser) return;
+  const handleLeaveAfterFinish = async () => {
+    if (!currentUser || isExiting) return;
     sounds.playClick();
+    if (activeClaimPromiseRef.current) {
+      try {
+        await activeClaimPromiseRef.current;
+      } catch {
+        // Proceed with room exit even if claim already resolved or failed
+      }
+    }
     await leaveGameRoom(roomId, currentUser.uid);
     onExitRoom();
   };
@@ -505,26 +598,26 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, initialRoom, onExitR
     const isLobbyFull = room.players.length >= lobbyMaxPlayers;
 
     return (
-      <div className="max-w-4xl mx-auto p-4 md:p-6 space-y-6 text-slate-800">
+      <div className="max-w-4xl mx-auto w-full p-2 sm:p-4 md:p-6 space-y-4 sm:space-y-6 text-slate-800">
         {/* Header Bar */}
-        <div className="bg-white border border-slate-200/90 rounded-3xl p-5 md:p-6 shadow-xs backdrop-blur-md">
-          <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+        <div className="bg-white border border-slate-200/90 rounded-3xl p-4 sm:p-5 md:p-6 shadow-xs backdrop-blur-md">
+          <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
             <div>
-              <div className="flex items-center flex-wrap gap-2 mb-1">
-                <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-900 border border-amber-300">
-                  မြွေနှင့်လှေကားဂိမ်း (Multiplayer)
-                </span>
+              <div className="flex items-center flex-wrap gap-2 text-xs text-slate-600 mb-1">
+                <span className="font-bold text-amber-800">မြွေနှင့်လှေကားဂိမ်း</span>
+                <span aria-hidden="true">·</span>
                 {isLobbyFull ? (
-                  <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                  <span className="font-bold text-emerald-700">
                     လူစုံပြီ ({room.players.length}/{lobbyMaxPlayers})
                   </span>
                 ) : (
-                  <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-sky-50 text-sky-700 border border-sky-200">
+                  <span className="font-semibold text-sky-700">
                     ကစားသမား စောင့်ဆိုင်းဆဲ ({room.players.length}/{lobbyMaxPlayers})
                   </span>
                 )}
-                <span className="text-xs text-slate-500">
-                  {room.exactFinish ? '★ အတိအကျဝင်ရန်လိုသည်' : '★ သာမန်စည်းမျဉ်း'}
+                <span aria-hidden="true">·</span>
+                <span className="text-slate-500">
+                  {room.exactFinish ? 'အတိအကျဝင်ရန်လိုသည်' : 'သာမန်စည်းမျဉ်း'}
                 </span>
               </div>
               <h1 className="text-xl md:text-2xl font-black text-slate-900 flex items-center gap-2">
@@ -536,37 +629,39 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, initialRoom, onExitR
             {/* Quick Share Buttons */}
             <div className="flex items-center gap-2 w-full md:w-auto">
               <button
+                type="button"
                 onClick={handleCopyCode}
-                className="flex-1 md:flex-initial px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200/80 border border-slate-200 text-slate-700 text-xs md:text-sm font-semibold flex items-center justify-center gap-2 transition cursor-pointer"
+                className="flex-1 md:flex-initial min-h-[44px] px-3.5 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200/80 border border-slate-200 text-slate-700 text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition cursor-pointer whitespace-nowrap"
               >
-                {copiedCode ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
+                {copiedCode ? <Check className="w-4 h-4 text-emerald-600 shrink-0" /> : <Copy className="w-4 h-4 shrink-0" />}
                 <span>{copiedCode ? 'ကုဒ်ကူးယူပြီး' : 'အခန်းကုဒ် ကူးမည်'}</span>
               </button>
 
               <button
+                type="button"
                 onClick={handleCopyLink}
-                className="flex-1 md:flex-initial px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-500 text-slate-950 text-xs md:text-sm font-bold flex items-center justify-center gap-2 transition shadow-xs cursor-pointer"
+                className="flex-1 md:flex-initial min-h-[44px] px-3.5 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-500 text-slate-950 text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition shadow-xs cursor-pointer whitespace-nowrap"
               >
-                {copiedLink ? <Check className="w-4 h-4" /> : <Share2 className="w-4 h-4" />}
+                {copiedLink ? <Check className="w-4 h-4 shrink-0" /> : <Share2 className="w-4 h-4 shrink-0" />}
                 <span>{copiedLink ? 'Link ကူးယူပြီး' : 'သူငယ်ချင်းဖိတ်ရန် Link'}</span>
               </button>
             </div>
           </div>
         </div>
 
-        {/* Players List Grid */}
-        <div className="space-y-3">
-          <div className="flex items-center justify-between px-2">
-            <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
-              <Users className="w-5 h-5 text-amber-600" />
-              <span>ပါဝင်သူများ ({room.players.length} / {lobbyMaxPlayers})</span>
+        {/* Players List Grid (2 columns on mobile so 4 players fit without pushing Start off-screen) */}
+        <div className="space-y-2.5 sm:space-y-3">
+          <div className="flex items-center justify-between px-1 sm:px-2">
+            <h2 className="text-sm sm:text-base font-bold text-slate-900 flex items-center gap-2">
+              <Users className="w-4 h-4 sm:w-5 sm:h-5 text-amber-600" />
+              <span className="tabular-nums">ပါဝင်သူများ ({room.players.length} / {lobbyMaxPlayers})</span>
             </h2>
-            <div className="text-xs text-slate-500">
-              ဂိမ်းစတင်ရန် အနည်းဆုံး ၂ ဦး လိုအပ်ပါသည်
+            <div className="text-[11px] sm:text-xs text-slate-500">
+              အနည်းဆုံး ၂ ဦး လိုအပ်ပါသည်
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-4">
             {room.players.map((player) => {
               const isRoomHost = player.uid === room.hostId;
               const isMe = player.uid === currentUser?.uid;
@@ -574,58 +669,61 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, initialRoom, onExitR
               return (
                 <div
                   key={player.uid}
-                  className={`relative bg-white border rounded-2xl p-4 flex flex-col items-center text-center transition-all duration-300 shadow-xs ${
+                  className={`relative bg-white border rounded-2xl p-3 sm:p-4 flex flex-col items-center text-center transition-all duration-200 shadow-xs ${
                     player.isReady
-                      ? 'border-emerald-400 bg-emerald-50/20 shadow-emerald-500/5'
+                      ? 'border-emerald-400 bg-emerald-50/20'
                       : 'border-slate-200'
                   }`}
                 >
-                  {/* Host Badge */}
+                  {/* Host Indicator */}
                   {isRoomHost && (
-                    <div className="absolute top-3 left-3 flex items-center gap-1 bg-amber-400 text-slate-950 px-2 py-0.5 rounded-full text-[10px] font-black shadow-xs">
-                      <Crown className="w-3 h-3 fill-current" />
+                    <div className="absolute top-2.5 left-2.5 flex items-center gap-1 bg-amber-400 text-slate-950 px-1.5 py-0.5 rounded-md text-[9px] sm:text-[10px] font-black">
+                      <Crown className="w-2.5 h-2.5 sm:w-3 sm:h-3 fill-current" />
                       <span>HOST</span>
                     </div>
                   )}
 
                   {/* Player Color Indicator */}
                   <div
-                    className="absolute top-3 right-3 w-3 h-3 rounded-full border border-white shadow-xs"
+                    className="absolute top-2.5 right-2.5 w-3 h-3 rounded-full border border-white shadow-xs"
                     style={{ backgroundColor: player.color }}
                     title="ကစားသမားအရောင်"
                   />
 
                   {/* Avatar */}
-                  <div className="w-16 h-16 rounded-full overflow-hidden border-2 border-slate-200 mb-3 mt-2 shadow-inner bg-slate-100">
+                  <div className="w-12 h-12 sm:w-16 sm:h-16 rounded-full overflow-hidden border-2 border-slate-200 mb-2 sm:mb-3 mt-3 sm:mt-2 shadow-inner bg-slate-100">
                     <img
                       src={player.photoURL || `https://api.dicebear.com/7.x/bottts/svg?seed=${player.uid}`}
                       alt={player.displayName}
+                      referrerPolicy="no-referrer"
                       className="w-full h-full object-cover"
                     />
                   </div>
 
                   {/* Name & Player ID */}
-                  <div className="font-bold text-slate-900 text-sm truncate max-w-[150px]">
+                  <div className="font-bold text-slate-900 text-xs sm:text-sm truncate max-w-full px-1">
                     {player.displayName} {isMe && '(သင်)'}
                   </div>
-                  <div className="text-xs font-mono text-amber-800 font-semibold mb-3">{player.playerId}</div>
+                  <div className="text-[11px] font-mono text-amber-800 font-semibold mb-2 sm:mb-3">
+                    {player.playerId}
+                  </div>
 
-                  {/* Ready Status Chip */}
+                  {/* Ready Status */}
                   <div
-                    className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-1.5 ${
+                    className={`px-2.5 py-1 rounded-lg text-[11px] sm:text-xs font-bold flex items-center gap-1 whitespace-nowrap ${
                       player.isReady
-                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-300'
+                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                         : 'bg-slate-100 text-slate-500 border border-slate-200'
                     }`}
                   >
                     {player.isReady ? (
                       <>
-                        <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                        <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                         <span>အဆင်သင့်ဖြစ်ပြီ</span>
                       </>
                     ) : (
                       <>
-                        <Clock className="w-3.5 h-3.5 text-slate-400" />
+                        <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                         <span>စောင့်ဆိုင်းဆဲ</span>
                       </>
                     )}
@@ -638,21 +736,22 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, initialRoom, onExitR
             {Array.from({ length: emptySlotCount }).map((_, i) => (
               <div
                 key={`empty-${i}`}
-                className="border-2 border-dashed border-slate-200/90 rounded-2xl p-6 flex flex-col items-center justify-center text-center text-slate-400 bg-slate-50/50 min-h-[170px]"
+                className="border-2 border-dashed border-slate-200/90 rounded-2xl p-4 sm:p-6 flex flex-col items-center justify-center text-center text-slate-400 bg-slate-50/50 min-h-[148px] sm:min-h-[170px]"
               >
-                <Users className="w-8 h-8 opacity-40 mb-2" />
-                <span className="text-xs font-semibold">ကစားသမား စောင့်ဆိုင်းနေပါသည်...</span>
-                <span className="text-[11px] text-slate-400 mt-1">ကုဒ်မျှဝေပြီး ဖိတ်ခေါ်ပါ</span>
+                <Users className="w-6 h-6 sm:w-8 sm:h-8 opacity-40 mb-1.5 sm:mb-2" />
+                <span className="text-[11px] sm:text-xs font-semibold">ကစားသမား စောင့်ဆိုင်းဆဲ</span>
+                <span className="text-[10px] sm:text-[11px] text-slate-400 mt-0.5">ကုဒ်မျှဝေပြီး ဖိတ်ခေါ်ပါ</span>
               </div>
             ))}
           </div>
         </div>
 
         {/* Lobby Controls */}
-        <div className="bg-white border border-slate-200/90 rounded-3xl p-5 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xs">
+        <div className="bg-white border border-slate-200/90 rounded-3xl p-4 sm:p-5 flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-4 shadow-xs">
           <button
-            onClick={handleLeaveRoom}
-            className="w-full sm:w-auto px-5 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-sm flex items-center justify-center gap-2 transition cursor-pointer border border-slate-200"
+            type="button"
+            onClick={requestExit}
+            className="w-full sm:w-auto min-h-[46px] px-5 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-sm flex items-center justify-center gap-2 transition cursor-pointer border border-slate-200 whitespace-nowrap"
           >
             <LogOut className="w-4 h-4" />
             <span>အခန်းမှ ထွက်မည်</span>
@@ -662,16 +761,17 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, initialRoom, onExitR
             {/* Non-host Ready Toggle */}
             {!isHost && (
               <button
+                type="button"
                 onClick={handleToggleReady}
-                className={`w-full sm:w-auto px-6 py-3.5 rounded-xl font-black text-sm flex items-center justify-center gap-2 transition shadow-xs cursor-pointer ${
+                className={`w-full sm:w-auto min-h-[48px] px-6 py-3.5 rounded-xl font-black text-sm flex items-center justify-center gap-2 transition shadow-xs cursor-pointer ${
                   currentPlayer?.isReady
                     ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
                     : 'bg-amber-400 hover:bg-amber-500 text-slate-950'
                 }`}
               >
-                <ShieldCheck className="w-5 h-5" />
+                <ShieldCheck className="w-5 h-5 shrink-0" />
                 <span>
-                  {currentPlayer?.isReady ? 'အဆင်သင့်ဖြစ်ပြီးပါပြီ (ပယ်ဖျက်ရန်နှိပ်ပါ)' : 'အဆင်သင့်ဖြစ်ပြီ'}
+                  {currentPlayer?.isReady ? 'အဆင်သင့်ဖြစ်ပြီးပါပြီ (ပယ်ဖျက်ရန်)' : 'အဆင်သင့်ဖြစ်ပြီ'}
                 </span>
               </button>
             )}
@@ -679,18 +779,19 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, initialRoom, onExitR
             {/* Host Start Game Button */}
             {isHost && (
               <button
+                type="button"
                 onClick={handleStartGame}
                 disabled={!canStartGame}
-                className={`w-full sm:w-auto px-8 py-3.5 rounded-xl font-black text-sm md:text-base flex items-center justify-center gap-2 transition shadow-xs ${
+                className={`w-full sm:w-auto min-h-[48px] px-7 py-3.5 rounded-xl font-black text-sm md:text-base flex items-center justify-center gap-2 transition shadow-xs ${
                   canStartGame
-                    ? 'bg-amber-400 hover:bg-amber-500 text-slate-950 cursor-pointer animate-pulse'
+                    ? 'bg-amber-400 hover:bg-amber-500 text-slate-950 cursor-pointer active:scale-[0.98]'
                     : 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200'
                 }`}
               >
-                <Play className="w-5 h-5 fill-current" />
+                <Play className="w-5 h-5 fill-current shrink-0" />
                 <span>
                   {room.players.length < 2
-                    ? 'ကစားသမား အနည်းဆုံး ၂ ယောက် လိုအပ်ပါသည်'
+                    ? 'ကစားသမား အနည်းဆုံး ၂ ဦး လိုအပ်ပါသည်'
                     : canStartGame
                     ? 'ဂိမ်းစတင်မည်'
                     : 'အားလုံး အဆင်သင့်ဖြစ်ရန် စောင့်ဆိုင်းပါ'}
@@ -701,7 +802,7 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, initialRoom, onExitR
         </div>
 
         {/* Quick Instructions */}
-        <div className="bg-amber-50/70 border border-amber-200/80 rounded-2xl p-4 flex items-start gap-3 text-xs text-slate-700">
+        <div className="bg-amber-50/70 border border-amber-200/80 rounded-2xl p-3.5 sm:p-4 flex items-start gap-3 text-xs text-slate-700">
           <Info className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
           <div>
             <span className="font-bold text-slate-900">ဂိမ်းကစားနည်း အကျဉ်းချုပ် - </span>
@@ -713,22 +814,32 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, initialRoom, onExitR
     );
   }
 
-  // 2. ACTIVE GAMEPLAY & VICTORY STATE
+  // 2. ACTIVE GAMEPLAY & VICTORY STATE (Inside Dedicated Game Mode Shell)
   const winningPlayer = room.winnerId ? room.players.find((p) => p.uid === room.winnerId) : undefined;
 
   return (
-    <div className="max-w-5xl mx-auto p-2 md:p-4 space-y-3 text-slate-800">
+    <div className="max-w-5xl mx-auto w-full space-y-2 sm:space-y-3 text-slate-800">
+      {/* Local Offline Notice if current device lost internet */}
+      {!isOnline && (
+        <div className="p-2.5 sm:p-3 bg-amber-50 border border-amber-300 rounded-2xl flex items-center gap-2 text-xs font-bold text-amber-950">
+          <WifiOff className="w-4 h-4 text-rose-600 shrink-0" />
+          <span>
+            အင်တာနက်လိုင်း ခေတ္တပြတ်တောက်နေပါသည်။ လိုင်းပြန်မိသည်နှင့် လက်ရှိကစားလက်စ နေရာမှ ဆက်လက်ကစားနိုင်ပါသည်။
+          </span>
+        </div>
+      )}
+
       {/* Disconnection Grace Period Notice (60 Seconds) */}
       {room.disconnectedPlayerId && (
-        <div className="p-3 bg-amber-100 border-2 border-amber-400 rounded-2xl flex items-center justify-between text-xs font-bold text-amber-950 animate-in fade-in shadow-xs">
-          <div className="flex items-center gap-2">
-            <WifiOff className="w-4 h-4 text-rose-600 shrink-0 animate-pulse" />
-            <span>
+        <div className="p-2.5 sm:p-3 bg-amber-100 border border-amber-400 rounded-2xl flex items-center justify-between gap-2 text-xs font-bold text-amber-950 shadow-xs">
+          <div className="flex items-center gap-2 min-w-0">
+            <WifiOff className="w-4 h-4 text-rose-600 shrink-0" />
+            <span className="truncate sm:whitespace-normal">
               ကစားသမား <strong className="text-rose-700 font-black">{room.disconnectedPlayerName}</strong> ၏
-              အင်တာနက်လိုင်း ပြတ်တောက်နေပါသည်။ ပြန်လည်ချိတ်ဆက်ရန် စောင့်ဆိုင်းပေးပါ...
+              လိုင်းပြတ်တောက်နေပါသည်။ စောင့်ဆိုင်းပေးပါ...
             </span>
           </div>
-          <span className="px-2.5 py-0.5 bg-rose-600 text-white rounded-full text-[11px] font-mono font-black shrink-0">
+          <span className="px-2.5 py-0.5 bg-rose-600 text-white rounded-lg text-[11px] font-mono tabular-nums font-black shrink-0">
             {reconnectCountdown}s ကျန်
           </span>
         </div>
@@ -736,48 +847,47 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, initialRoom, onExitR
 
       {/* Error notification banner */}
       {gameErrorNotice && (
-        <div className="p-3 bg-rose-50 border border-rose-300 rounded-xl text-xs font-semibold text-rose-800 flex items-center gap-2 animate-in fade-in">
+        <div className="p-2.5 sm:p-3 bg-rose-50 border border-rose-300 rounded-xl text-xs font-semibold text-rose-800 flex items-center gap-2">
           <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
           <span>{gameErrorNotice}</span>
         </div>
       )}
 
-      {/* Top Match Bar */}
-      <div className="bg-white border border-slate-200/90 rounded-2xl px-4 py-2.5 flex items-center justify-between gap-2 shadow-xs backdrop-blur-md">
-        <div className="flex items-center gap-2">
-          <span className="font-bold text-slate-900 text-sm">အခန်း: {room.roomCode}</span>
-          <span className="text-xs text-slate-500 hidden sm:inline">| မြွေနှင့်လှေကား</span>
-        </div>
+      {/* Compact Live Players & Tile Position Strip (Exit button lives solely in GameShell Top Bar) */}
+      <div className="bg-white border border-slate-200/90 rounded-2xl px-3 py-2 flex items-center justify-between gap-2 shadow-xs backdrop-blur-md">
+        <span className="text-xs font-bold text-slate-600 hidden sm:inline whitespace-nowrap shrink-0">
+          ကစားသမားများ
+        </span>
 
-        {/* Mini Players Progress Pills */}
-        <div className="flex items-center gap-2 overflow-x-auto py-1">
-          {room.players.map((p, idx) => (
-            <div
-              key={p.uid}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold border transition ${
-                idx === room.currentTurnIndex
-                  ? 'border-amber-400 bg-amber-100 text-amber-950 shadow-xs ring-2 ring-amber-300/40'
-                  : 'border-slate-200 bg-slate-50 text-slate-700'
-              }`}
-            >
-              <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: p.color }} />
-              <span className="truncate max-w-[70px]">{p.displayName}</span>
-              <span className="text-amber-800 font-mono text-[11px]">#{p.position}</span>
-              {p.isConnected === false && (
-                <span title="Offline">
-                  <WifiOff className="w-3 h-3 text-rose-600" />
+        <div className="flex items-center gap-1.5 sm:gap-2 overflow-x-auto w-full sm:w-auto py-0.5 scrollbar-none">
+          {room.players.map((p, idx) => {
+            const isCurrentTurn = idx === room.currentTurnIndex && room.status === 'playing';
+            return (
+              <div
+                key={p.uid}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-bold border transition whitespace-nowrap shrink-0 ${
+                  isCurrentTurn
+                    ? 'border-amber-400 bg-amber-100 text-amber-950 shadow-xs ring-2 ring-amber-300/40'
+                    : 'border-slate-200 bg-slate-50 text-slate-700'
+                }`}
+              >
+                <span
+                  className="w-2.5 h-2.5 rounded-full shrink-0"
+                  style={{ backgroundColor: p.color }}
+                />
+                <span className="truncate max-w-[78px] sm:max-w-[110px]">{p.displayName}</span>
+                <span className="text-amber-800 font-mono tabular-nums text-[11px]">
+                  #{p.position}
                 </span>
-              )}
-            </div>
-          ))}
+                {p.isConnected === false && (
+                  <span title="Offline">
+                    <WifiOff className="w-3 h-3 text-rose-600 shrink-0" />
+                  </span>
+                )}
+              </div>
+            );
+          })}
         </div>
-
-        <button
-          onClick={handleLeaveRoom}
-          className="text-xs text-rose-600 hover:text-rose-700 px-2 py-1 rounded hover:bg-rose-50 font-semibold transition cursor-pointer"
-        >
-          ထွက်မည်
-        </button>
       </div>
 
       {/* Main Board View with Version-Protected Step Animation */}
@@ -812,12 +922,11 @@ export const RoomView: React.FC<RoomViewProps> = ({ roomId, initialRoom, onExitR
           winner={winningPlayer}
           isHost={isHost}
           isCurrentUserWinner={room.winnerId === currentUser?.uid}
-          pointsEarned={rewardOutcome?.pointsEarned || 0}
-          xpEarned={rewardOutcome?.xpEarned || 0}
-          leveledUp={rewardOutcome?.leveledUp || false}
-          newLevel={rewardOutcome?.newLevel}
+          rewardResult={rewardOutcome}
+          fallbackProgress={deriveLevelProgress(userProfile?.totalXp ?? 0)}
+          isClaimingReward={isClaimingReward}
           onPlayAgain={handlePlayAgain}
-          onLeaveRoom={handleLeaveRoom}
+          onLeaveRoom={handleLeaveAfterFinish}
         />
       )}
     </div>

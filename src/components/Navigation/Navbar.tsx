@@ -121,8 +121,8 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab }) => {
                   title="ရွှေဒင်္ဂါးလက်ကျန် (ဆိုင်သို့သွားရန် နှိပ်ပါ)"
                 >
                   <Coins className="w-4 h-4 text-amber-600" />
-                  <span className="font-mono font-black text-amber-900 text-xs md:text-sm">
-                    {userProfile.points.toLocaleString()}
+                  <span className="font-mono font-black text-amber-900 text-xs md:text-sm tabular-nums">
+                    {(userProfile.currentPoints ?? userProfile.points ?? 0).toLocaleString()}
                   </span>
                 </button>
 
@@ -142,6 +142,7 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab }) => {
                     <img
                       src={userProfile.photoURL}
                       alt={userProfile.displayName}
+                      referrerPolicy="no-referrer"
                       className="w-full h-full object-cover rounded-lg bg-slate-100"
                     />
                   </div>
@@ -149,8 +150,13 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab }) => {
                     <div className="text-xs font-bold text-slate-800 group-hover:text-amber-600 transition truncate max-w-[100px]">
                       {userProfile.displayName}
                     </div>
-                    <div className="text-[10px] text-slate-500 font-mono">
-                      Lvl {userProfile.level}
+                    <div className="text-[10px] text-slate-500 font-mono flex items-center gap-1">
+                      <span>Lvl {userProfile.level}</span>
+                      {userProfile.level >= 999 && (
+                        <span className="px-1 rounded bg-slate-900 text-amber-300 text-[8px] font-black">
+                          MAX
+                        </span>
+                      )}
                     </div>
                   </div>
                 </button>
@@ -161,7 +167,7 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab }) => {
       </header>
 
       {/* Mobile Bottom Navigation Bar */}
-      <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-lg border-t border-slate-200 px-2 py-1.5 shadow-lg">
+      <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-lg border-t border-slate-200 px-2 pt-1.5 pb-safe shadow-lg">
         <div className="flex items-center justify-around">
           {navItems.map((item) => {
             const Icon = item.icon;

@@ -2,17 +2,19 @@
   "entities": {
     "User": {
       "title": "User",
-      "description": "User profile with game stats, points, level and customization inventory",
+      "description": "User profile with Level 1-999 progression, Total XP, separated Current Point Balance vs Total Points Earned, and customization inventory",
       "type": "object",
       "properties": {
         "id": {
           "type": "string",
-          "description": "Firebase Auth UID"
+          "description": "Firebase Auth UID",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
         "playerId": {
           "type": "string",
-          "description": "Unique 6-8 digit player ID",
-          "maxLength": 16
+          "description": "Unique player ID e.g. SG-729481",
+          "maxLength": 24
         },
         "displayName": {
           "type": "string",
@@ -21,7 +23,7 @@
         },
         "email": {
           "type": "string",
-          "description": "Google account email",
+          "description": "Account email",
           "maxLength": 120
         },
         "photoURL": {
@@ -31,15 +33,27 @@
         },
         "level": {
           "type": "number",
-          "description": "Current player level"
+          "description": "Current player level (1 to 999)"
         },
         "xp": {
           "type": "number",
-          "description": "Current experience points"
+          "description": "Current in-level experience progress"
+        },
+        "totalXp": {
+          "type": "number",
+          "description": "Cumulative lifetime experience points (continues accumulating past Level 999)"
         },
         "points": {
           "type": "number",
-          "description": "Gold points balance"
+          "description": "Current spendable gold points balance (synced with currentPoints)"
+        },
+        "currentPoints": {
+          "type": "number",
+          "description": "Current spendable point balance (reduced only by Shop purchases)"
+        },
+        "totalPointsEarned": {
+          "type": "number",
+          "description": "Cumulative lifetime points earned (never reduced by Shop purchases; used for Point Leaderboard)"
         },
         "totalWins": {
           "type": "number",
@@ -73,16 +87,52 @@
           "type": "array",
           "description": "List of purchased item IDs"
         },
+        "claimedAchievements": {
+          "type": "array",
+          "description": "List of claimed achievement IDs"
+        },
+        "lastClaimId": {
+          "type": "string",
+          "description": "Last verified atomic match reward claim receipt ID",
+          "maxLength": 128
+        },
+        "lastDailyClaimId": {
+          "type": "string",
+          "description": "Last verified atomic daily reward claim receipt ID",
+          "maxLength": 128
+        },
+        "lastAchievementClaimId": {
+          "type": "string",
+          "description": "Last verified atomic achievement claim receipt ID",
+          "maxLength": 128
+        },
+        "activeRoomId": {
+          "type": "string",
+          "description": "Currently active multiplayer room ID for session persistence",
+          "maxLength": 64
+        },
+        "activeRoomCode": {
+          "type": "string",
+          "description": "Short 6-character code of currently active room",
+          "maxLength": 16
+        },
+        "activeGameType": {
+          "type": "string",
+          "description": "Game type identifier of active room session",
+          "maxLength": 40
+        },
         "createdAt": {
           "type": "string",
-          "description": "ISO timestamp of creation"
+          "description": "ISO timestamp of creation",
+          "maxLength": 40
         },
         "updatedAt": {
           "type": "string",
-          "description": "ISO timestamp of last update"
+          "description": "ISO timestamp of last update",
+          "maxLength": 40
         }
       },
-      "required": ["id", "playerId", "displayName", "email", "level", "points"]
+      "required": ["id", "playerId", "displayName", "level", "points"]
     },
     "GameRoom": {
       "title": "GameRoom",
@@ -91,13 +141,13 @@
       "properties": {
         "id": {
           "type": "string",
-          "description": "Room Code ID",
-          "maxLength": 32
+          "description": "Room ID",
+          "maxLength": 64
         },
         "roomCode": {
           "type": "string",
           "description": "Short 6 character room code",
-          "maxLength": 10
+          "maxLength": 16
         },
         "gameType": {
           "type": "string",
@@ -131,6 +181,10 @@
           "type": "array",
           "description": "Array of connected player objects"
         },
+        "matchParticipantIds": {
+          "type": "array",
+          "description": "Bounded list of player UIDs participating in the completed match"
+        },
         "currentTurnIndex": {
           "type": "number",
           "description": "Index of player whose turn it is"
@@ -142,7 +196,7 @@
         "lastMoveSummary": {
           "type": "string",
           "description": "Burmese description of the last move event",
-          "maxLength": 300
+          "maxLength": 500
         },
         "winnerId": {
           "type": "string",
@@ -172,11 +226,13 @@
         },
         "disconnectedPlayerId": {
           "type": "string",
-          "description": "UID of disconnected player if any"
+          "description": "UID of disconnected player if any",
+          "maxLength": 128
         },
         "disconnectedPlayerName": {
           "type": "string",
-          "description": "Name of disconnected player"
+          "description": "Name of disconnected player",
+          "maxLength": 60
         },
         "lastMoveTimestamp": {
           "type": "number",
@@ -214,11 +270,13 @@
         },
         "createdAt": {
           "type": "string",
-          "description": "ISO timestamp of room creation"
+          "description": "ISO timestamp of room creation",
+          "maxLength": 40
         },
         "updatedAt": {
           "type": "string",
-          "description": "ISO timestamp of room update"
+          "description": "ISO timestamp of room update",
+          "maxLength": 40
         },
         "serverUpdatedAt": {
           "type": "string",
@@ -228,9 +286,141 @@
       },
       "required": ["id", "roomCode", "gameType", "hostId", "status", "maxPlayers", "players"]
     },
+    "MatchRewardClaim": {
+      "title": "MatchRewardClaim",
+      "description": "Immutable idempotent receipt proving a player claimed their verified match reward once",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Deterministic claim ID: {roomId}_r{gameRound}_{uid}",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Player UID claiming the reward",
+          "maxLength": 128
+        },
+        "roomId": {
+          "type": "string",
+          "description": "Finished GameRoom ID",
+          "maxLength": 64
+        },
+        "gameRound": {
+          "type": "number",
+          "description": "Finished GameRoom round counter"
+        },
+        "outcome": {
+          "type": "string",
+          "description": "Verified match result for this player",
+          "enum": ["win", "loss"]
+        },
+        "xpGranted": {
+          "type": "number",
+          "description": "Verified XP granted (+100 win, +75 loss)"
+        },
+        "pointsGranted": {
+          "type": "number",
+          "description": "Verified Points granted (+1000 win, +500 loss)"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Client ISO timestamp",
+          "maxLength": 40
+        },
+        "serverCreatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Authoritative Firestore serverTimestamp"
+        }
+      },
+      "required": ["id", "userId", "roomId", "gameRound", "outcome", "xpGranted", "pointsGranted", "createdAt", "serverCreatedAt"]
+    },
+    "DailyRewardClaim": {
+      "title": "DailyRewardClaim",
+      "description": "Immutable idempotent receipt for once-per-day login reward",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Deterministic daily claim ID: {uid}_d{dayBucket}",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "description": "Player UID",
+          "maxLength": 128
+        },
+        "dayBucket": {
+          "type": "number",
+          "description": "UTC epoch day bucket"
+        },
+        "xpGranted": {
+          "type": "number",
+          "description": "Verified daily XP granted"
+        },
+        "pointsGranted": {
+          "type": "number",
+          "description": "Verified daily Points granted"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp",
+          "maxLength": 40
+        },
+        "serverCreatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Authoritative server timestamp"
+        }
+      },
+      "required": ["id", "userId", "dayBucket", "xpGranted", "pointsGranted", "createdAt", "serverCreatedAt"]
+    },
+    "AchievementRewardClaim": {
+      "title": "AchievementRewardClaim",
+      "description": "Immutable idempotent receipt for one-time achievement reward",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Deterministic achievement claim ID: {uid}_ach_{achievementId}",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "description": "Player UID",
+          "maxLength": 128
+        },
+        "achievementId": {
+          "type": "string",
+          "description": "Achievement identifier",
+          "maxLength": 40
+        },
+        "xpGranted": {
+          "type": "number",
+          "description": "Verified achievement XP granted"
+        },
+        "pointsGranted": {
+          "type": "number",
+          "description": "Verified achievement Points granted"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp",
+          "maxLength": 40
+        },
+        "serverCreatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Authoritative server timestamp"
+        }
+      },
+      "required": ["id", "userId", "achievementId", "xpGranted", "pointsGranted", "createdAt", "serverCreatedAt"]
+    },
     "PointTransaction": {
       "title": "PointTransaction",
-      "description": "Record of points earned or spent",
+      "description": "Record of points and XP earned or spent",
       "type": "object",
       "properties": {
         "id": {
@@ -245,21 +435,26 @@
         },
         "type": {
           "type": "string",
-          "description": "reward, win, shop_purchase, level_bonus",
+          "description": "Transaction type",
           "maxLength": 40
         },
         "amount": {
           "type": "number",
           "description": "Positive for credit, negative for debit"
         },
+        "xpAmount": {
+          "type": "number",
+          "description": "Optional XP granted in this transaction"
+        },
         "description": {
           "type": "string",
           "description": "Burmese transaction description",
-          "maxLength": 200
+          "maxLength": 240
         },
         "createdAt": {
           "type": "string",
-          "description": "ISO timestamp"
+          "description": "ISO timestamp",
+          "maxLength": 40
         }
       },
       "required": ["id", "userId", "type", "amount", "description", "createdAt"]
@@ -270,7 +465,7 @@
       "schema": {
         "$ref": "User"
       },
-      "description": "User profiles and player records"
+      "description": "User profiles, Level 1-999 progression, Current Point Balance, and Total Points Earned"
     },
     "/rooms/{roomId}": {
       "schema": {
@@ -278,11 +473,29 @@
       },
       "description": "Live multiplayer game rooms and boards"
     },
+    "/reward_claims/{claimId}": {
+      "schema": {
+        "$ref": "MatchRewardClaim"
+      },
+      "description": "Immutable receipts enforcing one-time server-verified match rewards"
+    },
+    "/daily_claims/{dailyClaimId}": {
+      "schema": {
+        "$ref": "DailyRewardClaim"
+      },
+      "description": "Immutable receipts enforcing once-per-day login rewards"
+    },
+    "/achievement_claims/{achClaimId}": {
+      "schema": {
+        "$ref": "AchievementRewardClaim"
+      },
+      "description": "Immutable receipts enforcing one-time achievement rewards"
+    },
     "/transactions/{transactionId}": {
       "schema": {
         "$ref": "PointTransaction"
       },
-      "description": "Ledger of point rewards and shop purchases"
+      "description": "Ledger of point/XP rewards and shop purchases"
     }
   }
 }

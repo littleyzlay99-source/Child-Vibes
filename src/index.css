@@ -1,1 +1,25 @@
 @import "tailwindcss";
+
+@layer base {
+  html,
+  body {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  button,
+  [role="button"] {
+    touch-action: manipulation;
+  }
+}
+
+.pt-safe {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+.pb-safe {
+  padding-bottom: max(0.375rem, env(safe-area-inset-bottom, 0px));
+}
+
+.pb-safe-game {
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom, 0px));
+}
