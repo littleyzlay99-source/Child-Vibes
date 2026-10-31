@@ -190,12 +190,12 @@ function buildSlalomGateObstacle(
 }
 
 /**
- * Generates a deterministic, passable 1,000m obstacle + Item Box layout from `seed`.
+ * Generates a deterministic, passable 1,500m obstacle + Item Box layout from `seed`.
  * - Same `seed` -> identical obstacle & itemBox arrays.
  * - Different `seed` -> different obstacle & itemBox lane placements.
  * - Every obstacle row leaves at least `MIN_OPEN_LANES_PER_ROW` (2) passable lanes open.
- * - Includes all 6 required obstacle types across the 1,000m course.
- * - Keeps obstacles clear of the 6 deterministic Item Box stations [140, 280, 420, 560, 700, 840] m.
+ * - Includes all 6 required obstacle types across the 1,500m (`COURSE_LENGTH_M`) course.
+ * - Keeps obstacles clear of all 10 deterministic Item Box stations (`ITEM_BOX_ROW_DISTANCES_M`).
  */
 export function generateSnowRushTrack(seed?: number): SnowRushTrackLayout {
   const effectiveSeed = normalizeTrackSeed(seed);

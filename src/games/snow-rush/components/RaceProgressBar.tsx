@@ -13,6 +13,7 @@ import {
   VolumeX,
   Zap,
 } from 'lucide-react';
+import { COURSE_CHECKPOINT_METERS, COURSE_LENGTH_M } from '../constants';
 import type { MultiplayerHudExtras } from '../multiplayerHud';
 import type { RacePhase, SnowRushHudSnapshot } from '../types';
 
@@ -320,7 +321,7 @@ export const RaceProgressBar: React.FC<RaceProgressBarProps> = ({
           </div>
         </div>
 
-        {/* Course Progress Track (0.00 km -> 1.00 km Finish Line + Avalanche Wave Front) */}
+        {/* Course Progress Track (0.00 km -> 1.50 km Finish Line + Quarter-KM Checkpoints + Avalanche Wave Front) */}
         <div className="flex items-center gap-2.5">
           <span className="text-[10px] font-mono font-bold text-slate-500 tabular-nums shrink-0">
             0.00 km
@@ -330,7 +331,7 @@ export const RaceProgressBar: React.FC<RaceProgressBarProps> = ({
             className="relative flex-1 h-3.5 rounded-full bg-slate-200/90 border border-slate-300/80 overflow-visible"
             role="progressbar"
             aria-valuemin={0}
-            aria-valuemax={1000}
+            aria-valuemax={COURSE_LENGTH_M}
             aria-valuenow={Math.round(hud.distanceM)}
             aria-label="ပြိုင်ပွဲ အကွာအဝေး ပြပြား"
           >
@@ -339,6 +340,20 @@ export const RaceProgressBar: React.FC<RaceProgressBarProps> = ({
               className="h-full rounded-full bg-gradient-to-r from-sky-500 via-cyan-400 to-amber-400 transition-[width] duration-75"
               style={{ width: `${clampedPercent.toFixed(1)}%` }}
             />
+
+            {/* Quarter-Kilometer Checkpoint Ticks (0.25, 0.50, 0.75, 1.00, 1.25 km) */}
+            {COURSE_CHECKPOINT_METERS.map((checkpointM) => {
+              const checkpointPct = (checkpointM / COURSE_LENGTH_M) * 100;
+              return (
+                <span
+                  key={checkpointM}
+                  title={`${(checkpointM / 1000).toFixed(2)} km (${checkpointM} m)`}
+                  aria-hidden="true"
+                  className="absolute inset-y-0.5 w-px bg-slate-600/35 pointer-events-none"
+                  style={{ left: `${checkpointPct.toFixed(2)}%` }}
+                />
+              );
+            })}
 
             {/* Trailing Avalanche Zone Overlay on Track Bar */}
             {clampedAvalanchePercent > 0 && (
@@ -389,7 +404,7 @@ export const RaceProgressBar: React.FC<RaceProgressBarProps> = ({
 
           <span className="inline-flex items-center gap-1 text-[10px] font-mono font-black text-slate-800 tabular-nums shrink-0">
             <Flag className="w-3 h-3 text-amber-600 fill-amber-400" />
-            <span>1.00 km</span>
+            <span>{hud.courseLengthKmText} km</span>
           </span>
         </div>
       </div>

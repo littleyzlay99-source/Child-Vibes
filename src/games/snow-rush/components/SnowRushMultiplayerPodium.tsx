@@ -1,5 +1,6 @@
 import React from 'react';
 import { Clock, Flag, LogOut, Trophy, Wifi } from 'lucide-react';
+import { COURSE_LENGTH_KM_TEXT } from '../constants';
 import type { RaceFinishState, SnowRushSnapshot } from '../engine/multiplayerTypes';
 import { formatMultiplayerFinishReasonMm } from '../multiplayerHud';
 import type { SnowRushConnectionStatus } from '../network/SnowRushSocketClient';
@@ -92,7 +93,7 @@ export const SnowRushMultiplayerPodium: React.FC<SnowRushMultiplayerPodiumProps>
                 ? `${formatRaceTimeSec(entry.finishTimeMs)}s`
                 : 'အချိန်ပြည့်';
             const distanceLabel = entry.finished
-              ? '1.00 km'
+              ? `${COURSE_LENGTH_KM_TEXT} km`
               : `${formatDistanceKm(entry.distanceM)} km (${Math.round(entry.distanceM)} m)`;
 
             return (

@@ -1289,9 +1289,9 @@ async function runAllTests(): Promise<void> {
       'Active 20 Hz tick loop started when 4 racers connected'
     );
 
-    // Step race deterministically to completion while racers steer onto Item Box lanes & use items
+    // Step 1,500m race deterministically to completion while racers steer onto Item Box lanes & use items
     let safetyTicks = 0;
-    while (roomDo.getDebugMetrics().racePhase !== 'finished' && safetyTicks < 2200) {
+    while (roomDo.getDebugMetrics().racePhase !== 'finished' && safetyTicks < 3400) {
       safetyTicks += 1;
       cluster.nowMsValue += Math.round(MULTIPLAYER_TICK_DT_SEC * 1000);
 
@@ -1342,12 +1342,16 @@ async function runAllTests(): Promise<void> {
     const finalSnap = clients[0].getLatestSnapshot()!;
     assert(finalSnap.finishState.finalized === true, 'Finish state finalized');
     assert(finalSnap.finishState.winnerId !== null, 'Winner locked deterministically');
+    assert(
+      finalSnap.racers[finalSnap.finishState.winnerId!].distanceM === 1500,
+      'Winner crossed the 1,500m (1.50 KM) authoritative finish line'
+    );
     assert(finalSnap.raceStandings.length === 4, '4-racer standings computed');
 
     const sqlStats = cluster.sqlByRoom.get('room_race4')!;
     assert(
-      sqlStats.writeCount > 0 && sqlStats.writeCount <= 30,
-      `Minimal SQLite checkpoint writes (${sqlStats.writeCount} writes for entire ${safetyTicks}-tick race)`
+      sqlStats.writeCount > 0 && sqlStats.writeCount <= 36,
+      `Minimal SQLite checkpoint writes (${sqlStats.writeCount} writes for entire ${safetyTicks}-tick 1.50km race)`
     );
 
     for (const c of clients) {

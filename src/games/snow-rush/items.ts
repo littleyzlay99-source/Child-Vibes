@@ -74,7 +74,8 @@ function shuffleDeterministic<T>(items: readonly T[], rng: () => number): T[] {
 }
 
 /**
- * Generates deterministic world-coordinate Item Boxes at [140, 280, 420, 560, 700, 840] meters.
+ * Generates deterministic world-coordinate Item Boxes across `ITEM_BOX_ROW_DISTANCES_M`
+ * ([140, 280, 420, 560, 700, 840, 980, 1120, 1260, 1400] meters along the 1,500m course).
  * Places 3 or 4 Item Boxes across the 5 track lanes per row using a seeded PRNG.
  */
 export function generateDeterministicItemBoxes(seed: number): SnowRushItemBox[] {

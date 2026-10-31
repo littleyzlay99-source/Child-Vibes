@@ -1,6 +1,13 @@
 import {
+  AVALANCHE_BASE_SPEED_MPS,
+  AVALANCHE_CATCHUP_MAX_GAP_M,
+  AVALANCHE_MAX_SPEED_MPS,
+  AVALANCHE_SAFE_GRACE_SEC,
+  COURSE_LENGTH_KM_TEXT,
   COURSE_LENGTH_M,
   ITEM_ARMING_DELAY_SEC,
+  ITEM_BOX_OBSTACLE_CLEARANCE_M,
+  ITEM_BOX_ROW_DISTANCES_M,
   MERCY_INVULN_DURATION_SEC,
   MULTIPLAYER_TICK_DT_SEC,
   NITRO_MAX_SPEED_CAP_MPS,
@@ -12,11 +19,14 @@ import {
   STARTING_GRID_LANES_2P,
   STARTING_GRID_LANES_3P,
   STARTING_GRID_LANES_4P,
+  TRACK_OBSTACLE_END_M,
+  TRACK_OBSTACLE_START_M,
   TRACK_SAFE_LANE_LIMIT,
 } from '../constants';
 import {
   buildHudSnapshot,
   createInitialSnowRushState,
+  formatDistanceKm,
   startCountdownState,
   stepSnowRushSimulation,
 } from '../simulation';
@@ -215,7 +225,7 @@ export function runSnowRushMultiplayerEngineTests(): AutomatedTestResult[] {
         assert(obs.openLaneCenters.length >= 2, 'Every obstacle row must keep >= 2 open lanes');
       }
       assert(seenKinds.size === 6, 'All 6 Snow Rush obstacle kinds must be generated');
-      assert(stateA.itemBoxes.length >= 18, '6 Item Box rows x 3..4 boxes must be present');
+      assert(stateA.itemBoxes.length >= 30, '10 Item Box rows x 3..4 boxes must be present');
     }
   );
 
@@ -936,10 +946,10 @@ export function runSnowRushMultiplayerEngineTests(): AutomatedTestResult[] {
     }
   );
 
-  // 12. Avalanche ဖမ်းမိချိန် Snow Tumble နှင့် Safe Recovery အလုပ်လုပ်ခြင်း + 1,000 m မကျော်ဘဲ false finish မဖြစ်ခြင်း
+  // 12. Avalanche ဖမ်းမိချိန် Snow Tumble နှင့် Safe Recovery အလုပ်လုပ်ခြင်း + 1,500 m မကျော်ဘဲ false finish မဖြစ်ခြင်း
   registerTest(
     12,
-    'Avalanche ဖမ်းမိချိန် Snow Tumble နှင့် Safe Recovery အလုပ်လုပ်ခြင်း + 1,000 m မကျော်ဘဲ false finish မဖြစ်ခြင်း',
+    'Avalanche ဖမ်းမိချိန် Snow Tumble နှင့် Safe Recovery အလုပ်လုပ်ခြင်း + 1,500 m မကျော်ဘဲ false finish မဖြစ်ခြင်း',
     () => {
       let state = advanceThroughCountdown(
         createInitialMultiplayerRaceState({
@@ -949,13 +959,13 @@ export function runSnowRushMultiplayerEngineTests(): AutomatedTestResult[] {
         })
       );
 
-      // Force Avalanche catch near end of course (~980m) so +25m recovery would exceed 1,000m if unclamped
+      // Force Avalanche catch near end of course (COURSE_LENGTH_M - 20 = 1,480m) so +25m recovery would exceed 1,500m if unclamped
       state = {
         ...state,
-        elapsedRaceMs: 50000,
+        elapsedRaceMs: 74000,
         avalanche: {
           ...state.avalanche,
-          distanceM: 981,
+          distanceM: COURSE_LENGTH_M - 19,
           speedMps: 18.5,
           graceRemainingSec: 0,
           isActive: true,
@@ -963,12 +973,12 @@ export function runSnowRushMultiplayerEngineTests(): AutomatedTestResult[] {
         racers: {
           uid_alpha: {
             ...state.racers.uid_alpha,
-            distanceM: 980,
+            distanceM: COURSE_LENGTH_M - 20,
             speedMps: 12,
           },
           uid_bravo: {
             ...state.racers.uid_bravo,
-            distanceM: 990,
+            distanceM: COURSE_LENGTH_M - 10,
             speedMps: 20,
           },
         },
@@ -1002,7 +1012,7 @@ export function runSnowRushMultiplayerEngineTests(): AutomatedTestResult[] {
       assert(sawRecoveryEvent && recovered.tumbleTimerSec === 0, 'Tumble timer completes after 1.3s');
       assert(
         recovered.distanceM < COURSE_LENGTH_M && recovered.finishTimeMs === null,
-        `Snow Tumble recovery must NEVER false-finish >= 1000m (got ${recovered.distanceM}m)`
+        `Snow Tumble recovery must NEVER false-finish >= ${COURSE_LENGTH_M}m (got ${recovered.distanceM}m)`
       );
       assert(recovered.invulnerableTimerSec > 0, 'Recovered racer receives post-tumble invulnerability');
 
@@ -1068,17 +1078,17 @@ export function runSnowRushMultiplayerEngineTests(): AutomatedTestResult[] {
 
       state = {
         ...state,
-        elapsedRaceMs: 48000,
+        elapsedRaceMs: 72000,
         racers: {
           uid_alpha: {
             ...state.racers.uid_alpha,
-            distanceM: 999.5,
+            distanceM: COURSE_LENGTH_M - 0.5,
             laneOffset: 0,
             speedMps: 22,
           },
           uid_bravo: {
             ...state.racers.uid_bravo,
-            distanceM: 950,
+            distanceM: COURSE_LENGTH_M - 50,
             laneOffset: 0,
             speedMps: 18,
             heldItem: 'snowball_attack',
@@ -1087,7 +1097,7 @@ export function runSnowRushMultiplayerEngineTests(): AutomatedTestResult[] {
         },
       };
 
-      // Step 1: uid_alpha crosses 1,000m and becomes a Finished Player
+      // Step 1: uid_alpha crosses 1,500m and becomes a Finished Player
       state = stepMultiplayerSnowRushTick(state, {}, 0.05);
       const lockedFinishMs = state.racers.uid_alpha.finishTimeMs;
       assert(lockedFinishMs !== null && state.racers.uid_alpha.finishRank === 1, 'uid_alpha finished 1st');
@@ -1099,7 +1109,7 @@ export function runSnowRushMultiplayerEngineTests(): AutomatedTestResult[] {
           {
             id: 'trap_on_finished_player',
             ownerId: 'uid_bravo',
-            distanceM: 1000,
+            distanceM: COURSE_LENGTH_M,
             laneOffset: 0,
             halfLengthM: 1.5,
             halfWidthLane: 0.3,
@@ -1110,7 +1120,7 @@ export function runSnowRushMultiplayerEngineTests(): AutomatedTestResult[] {
         ],
         avalanche: {
           ...state.avalanche,
-          distanceM: 985,
+          distanceM: COURSE_LENGTH_M - 15,
           speedMps: 19.2,
           graceRemainingSec: 0,
           isActive: true,
@@ -1153,11 +1163,11 @@ export function runSnowRushMultiplayerEngineTests(): AutomatedTestResult[] {
 
       state = {
         ...state,
-        elapsedRaceMs: 45000,
+        elapsedRaceMs: 68000,
         racers: {
-          uid_alpha: { ...state.racers.uid_alpha, distanceM: 999.6, speedMps: 20 },
-          uid_bravo: { ...state.racers.uid_bravo, distanceM: 700, speedMps: 18 },
-          uid_charlie: { ...state.racers.uid_charlie, distanceM: 650, speedMps: 18 },
+          uid_alpha: { ...state.racers.uid_alpha, distanceM: COURSE_LENGTH_M - 0.4, speedMps: 20 },
+          uid_bravo: { ...state.racers.uid_bravo, distanceM: 1100, speedMps: 18 },
+          uid_charlie: { ...state.racers.uid_charlie, distanceM: 1020, speedMps: 18 },
         },
       };
 
@@ -1195,15 +1205,15 @@ export function runSnowRushMultiplayerEngineTests(): AutomatedTestResult[] {
 
       state = {
         ...state,
-        elapsedRaceMs: 46000,
+        elapsedRaceMs: 69000,
         racers: {
-          uid_alpha: { ...state.racers.uid_alpha, distanceM: 999.7, speedMps: 20 },
-          uid_bravo: { ...state.racers.uid_bravo, distanceM: 250, speedMps: 14 },
-          uid_charlie: { ...state.racers.uid_charlie, distanceM: 120, speedMps: 14 },
+          uid_alpha: { ...state.racers.uid_alpha, distanceM: COURSE_LENGTH_M - 0.3, speedMps: 20 },
+          uid_bravo: { ...state.racers.uid_bravo, distanceM: 450, speedMps: 14 },
+          uid_charlie: { ...state.racers.uid_charlie, distanceM: 220, speedMps: 14 },
         },
       };
 
-      // Step 320 ticks (16.0 seconds > 15.0s window); bravo & charlie are too far back to reach 1000m
+      // Step 320 ticks (16.0 seconds > 15.0s window); bravo & charlie are too far back to reach 1,500m
       for (let i = 0; i < 320; i += 1) {
         state = stepMultiplayerSnowRushTick(state, {}, 0.05);
         if (state.phase === 'finished') break;
@@ -1282,12 +1292,12 @@ export function runSnowRushMultiplayerEngineTests(): AutomatedTestResult[] {
 
       state = {
         ...state,
-        elapsedRaceMs: 47000,
+        elapsedRaceMs: 70000,
         racers: {
-          uid_alpha: { ...state.racers.uid_alpha, distanceM: 999.8, speedMps: 19 },
+          uid_alpha: { ...state.racers.uid_alpha, distanceM: COURSE_LENGTH_M - 0.2, speedMps: 19 },
           uid_bravo: {
             ...state.racers.uid_bravo,
-            distanceM: 985,
+            distanceM: COURSE_LENGTH_M - 15,
             speedMps: 29.5,
             nitroTimerSec: 2.0,
           },
@@ -1330,15 +1340,15 @@ export function runSnowRushMultiplayerEngineTests(): AutomatedTestResult[] {
 
       state = {
         ...state,
-        elapsedRaceMs: 48000,
+        elapsedRaceMs: 71000,
         racers: {
-          uid_alpha: { ...state.racers.uid_alpha, distanceM: 999.5, speedMps: 20 },
-          uid_bravo: { ...state.racers.uid_bravo, distanceM: 995.0, speedMps: 20 },
-          uid_charlie: { ...state.racers.uid_charlie, distanceM: 990.0, speedMps: 20 },
+          uid_alpha: { ...state.racers.uid_alpha, distanceM: COURSE_LENGTH_M - 0.5, speedMps: 20 },
+          uid_bravo: { ...state.racers.uid_bravo, distanceM: COURSE_LENGTH_M - 5.0, speedMps: 20 },
+          uid_charlie: { ...state.racers.uid_charlie, distanceM: COURSE_LENGTH_M - 10.0, speedMps: 20 },
         },
       };
 
-      // Within ~15 ticks (0.75s << 15.0s), all 3 racers cross 1000m
+      // Within ~15 ticks (0.75s << 15.0s), all 3 racers cross 1,500m
       let ticksElapsed = 0;
       for (let i = 0; i < 30; i += 1) {
         state = stepMultiplayerSnowRushTick(state, {}, 0.05);
@@ -1373,7 +1383,7 @@ export function runSnowRushMultiplayerEngineTests(): AutomatedTestResult[] {
       state = setMultiplayerRacerConnection(state, 'uid_charlie', false);
 
       let safetyTicks = 0;
-      while (state.phase !== 'finished' && safetyTicks < 2000) {
+      while (state.phase !== 'finished' && safetyTicks < 3400) {
         const alphaSteer: -1 | 0 | 1 = safetyTicks % 20 < 10 ? -1 : 1;
         state = stepMultiplayerSnowRushTick(
           state,
@@ -1406,7 +1416,7 @@ export function runSnowRushMultiplayerEngineTests(): AutomatedTestResult[] {
         jumpPressed: false,
         useItemPressed: false,
         seq: 1,
-        distanceM: 1000,
+        distanceM: COURSE_LENGTH_M,
         speedMps: 999,
         laneOffset: 0,
         heldItem: 'nitro_boost',
@@ -1627,7 +1637,7 @@ export function runSnowRushMultiplayerEngineTests(): AutomatedTestResult[] {
         });
         const allEventTypes: string[] = [];
         let tick = 0;
-        while (s.phase !== 'finished' && tick < 2200) {
+        while (s.phase !== 'finished' && tick < 3400) {
           tick += 1;
           s = stepMultiplayerSnowRushTick(s, {
             uid_alpha: {
@@ -1701,7 +1711,7 @@ export function runSnowRushMultiplayerEngineTests(): AutomatedTestResult[] {
       assert(sp.phase === 'countdown', 'Local countdown starts');
 
       let safety = 0;
-      while (sp.phase !== 'finished' && safety < 2200) {
+      while (sp.phase !== 'finished' && safety < 3400) {
         safety += 1;
         sp = stepSnowRushSimulation(
           sp,
@@ -1722,7 +1732,343 @@ export function runSnowRushMultiplayerEngineTests(): AutomatedTestResult[] {
           sp.player.finishTimeMs !== null &&
           hud.finishRank !== null &&
           hud.totalRacers === 3,
-        'Single-player stepSnowRushSimulation() completes 1,000m race cleanly with HUD snapshot intact'
+        'Single-player stepSnowRushSimulation() completes 1,500m race cleanly with HUD snapshot intact'
+      );
+    }
+  );
+
+  // 26. 1000m (1.00 KM) တွင် မပြီးဆုံးဘဲ 1500m (1.50 KM) အထိ ဆက်လက်ပြေးနိုင်ခြင်း
+  registerTest(
+    26,
+    '1000m (1.00 KM) တွင် မပြီးဆုံးဘဲ 1500m (1.50 KM) အထိ ဆက်လက်ပြေးနိုင်ခြင်း',
+    () => {
+      assert(COURSE_LENGTH_M === 1500, 'COURSE_LENGTH_M must be centralized at 1500 meters');
+      assert(COURSE_LENGTH_KM_TEXT === '1.50', 'COURSE_LENGTH_KM_TEXT must be 1.50');
+
+      // Single-player check across 1,000m boundary
+      let sp = startCountdownState(
+        createInitialSnowRushState({
+          playerName: 'သင်',
+          showOfflineBots: false,
+          trackSeed: 20261500,
+        }),
+        { trackSeed: 20261500 }
+      );
+      while (sp.phase === 'countdown') {
+        sp = stepSnowRushSimulation(
+          sp,
+          { steerLeft: false, steerRight: false, jumpPressed: false, useItemPressed: false },
+          0.05
+        );
+      }
+      sp = {
+        ...sp,
+        elapsedRaceMs: 49000,
+        player: {
+          ...sp.player,
+          distanceM: 999.2,
+          speedMps: 20.6,
+        },
+      };
+      sp = stepSnowRushSimulation(
+        sp,
+        { steerLeft: false, steerRight: false, jumpPressed: false, useItemPressed: false },
+        0.05
+      );
+      const spHudAt1000 = buildHudSnapshot(sp);
+      assert(sp.player.distanceM > 1000, 'Single-player crosses past 1000m');
+      assert(
+        sp.phase === 'racing' && sp.player.finishTimeMs === null,
+        'Single-player MUST NOT finish at 1000m'
+      );
+      assertApprox(
+        spHudAt1000.progressPercent,
+        (sp.player.distanceM / 1500) * 100,
+        0.05,
+        'Single-player progressPercent at ~1000m is ~66.7% (NOT 100%)'
+      );
+      assert(spHudAt1000.progressPercent < 68, 'Progress at 1000m must be ~66.7%');
+
+      // Multiplayer check across 1,000m boundary
+      let mp = advanceThroughCountdown(
+        createInitialMultiplayerRaceState({
+          players: TEST_PLAYERS_2,
+          trackSeed: 20261500,
+          initialPhase: 'countdown',
+        })
+      );
+      mp = {
+        ...mp,
+        elapsedRaceMs: 49000,
+        racers: {
+          uid_alpha: { ...mp.racers.uid_alpha, distanceM: 999.4, speedMps: 20.6 },
+          uid_bravo: { ...mp.racers.uid_bravo, distanceM: 995.0, speedMps: 20.0 },
+        },
+      };
+      mp = stepMultiplayerSnowRushTick(mp, {}, 0.05);
+      assert(mp.racers.uid_alpha.distanceM > 1000, 'Multiplayer racer crosses past 1000m');
+      assert(
+        mp.phase === 'racing' &&
+          mp.finishState.winnerId === null &&
+          mp.racers.uid_alpha.finishTimeMs === null,
+        'Multiplayer race MUST NOT finish or start finish_window at 1000m'
+      );
+    }
+  );
+
+  // 27. 1500m တွင်သာ Race Finish ဖြစ်ခြင်း နှင့် 0.00 -> 1.50 KM Progress Milestones မှန်ကန်ခြင်း
+  registerTest(
+    27,
+    '1500m တွင်သာ Race Finish ဖြစ်ခြင်း နှင့် 0.00 -> 1.50 KM Progress Milestones မှန်ကန်ခြင်း',
+    () => {
+      // Milestone formatting verification across 0.00 -> 1.50 KM
+      assert(formatDistanceKm(0) === '0.00', '0m -> 0.00');
+      assert(formatDistanceKm(250) === '0.25', '250m -> 0.25');
+      assert(formatDistanceKm(500) === '0.50', '500m -> 0.50');
+      assert(formatDistanceKm(750) === '0.75', '750m -> 0.75');
+      assert(formatDistanceKm(1000) === '1.00', '1000m -> 1.00');
+      assert(formatDistanceKm(1250) === '1.25', '1250m -> 1.25');
+      assert(formatDistanceKm(1500) === '1.50', '1500m -> 1.50');
+      assert(formatDistanceKm(1650) === '1.50', 'Clamped above 1500m -> 1.50');
+
+      // Single-player finish at 1,500m
+      let sp = startCountdownState(
+        createInitialSnowRushState({
+          playerName: 'သင်',
+          showOfflineBots: false,
+          trackSeed: 15002026,
+        }),
+        { trackSeed: 15002026 }
+      );
+      while (sp.phase === 'countdown') {
+        sp = stepSnowRushSimulation(
+          sp,
+          { steerLeft: false, steerRight: false, jumpPressed: false, useItemPressed: false },
+          0.05
+        );
+      }
+      sp = {
+        ...sp,
+        elapsedRaceMs: 73500,
+        player: { ...sp.player, distanceM: 1499.4, speedMps: 20.6 },
+      };
+      sp = stepSnowRushSimulation(
+        sp,
+        { steerLeft: false, steerRight: false, jumpPressed: false, useItemPressed: false },
+        0.05
+      );
+      const finishedHud = buildHudSnapshot(sp);
+      assert(
+        sp.phase === 'finished' &&
+          sp.player.distanceM === 1500 &&
+          sp.player.finishTimeMs !== null &&
+          finishedHud.progressPercent === 100 &&
+          finishedHud.distanceKmText === '1.50' &&
+          finishedHud.courseLengthKmText === '1.50',
+        'Single-player finishes cleanly at exactly 1500m (1.50 km / 100%)'
+      );
+
+      // Multiplayer finish at 1,500m
+      let mp = advanceThroughCountdown(
+        createInitialMultiplayerRaceState({
+          players: TEST_PLAYERS_2,
+          trackSeed: 15002026,
+          initialPhase: 'countdown',
+        })
+      );
+      mp = {
+        ...mp,
+        elapsedRaceMs: 73500,
+        racers: {
+          uid_alpha: { ...mp.racers.uid_alpha, distanceM: 1499.4, speedMps: 20.6 },
+          uid_bravo: { ...mp.racers.uid_bravo, distanceM: 1480.0, speedMps: 20.0 },
+        },
+      };
+      mp = stepMultiplayerSnowRushTick(mp, {}, 0.05);
+      assert(
+        mp.phase === 'finish_window' &&
+          mp.finishState.winnerId === 'uid_alpha' &&
+          mp.racers.uid_alpha.distanceM === 1500 &&
+          mp.racers.uid_alpha.finishRank === 1,
+        'Multiplayer locks winner at 1500m and opens 15s post-winner window'
+      );
+    }
+  );
+
+  // 28. 1500m အထိ Track Obstacles နှင့် 10 Item Box Stations ဖြန့်ကျက်တည်ရှိခြင်း
+  registerTest(
+    28,
+    '1500m အထိ Track Obstacles နှင့် 10 Item Box Stations ဖြန့်ကျက်တည်ရှိခြင်း',
+    () => {
+      assert(TRACK_OBSTACLE_START_M === 74 && TRACK_OBSTACLE_END_M === 1458, 'Obstacle zone spans 74m..1458m');
+      assert(
+        JSON.stringify(ITEM_BOX_ROW_DISTANCES_M) ===
+          JSON.stringify([140, 280, 420, 560, 700, 840, 980, 1120, 1260, 1400]),
+        '10 deterministic Item Box stations span evenly up to 1400m'
+      );
+
+      for (const seed of [101010, 20260409, 888999111]) {
+        const state = createInitialMultiplayerRaceState({
+          players: TEST_PLAYERS_4,
+          trackSeed: seed,
+        });
+        const { obstacles, itemBoxes } = state.track;
+        assert(obstacles.length >= 60, `1,500m track must have rich obstacle density (got ${obstacles.length})`);
+
+        const minObsM = Math.min(...obstacles.map((o) => o.distanceM));
+        const maxObsM = Math.max(...obstacles.map((o) => o.distanceM));
+        assert(minObsM >= TRACK_OBSTACLE_START_M && minObsM < 90, 'Obstacles start near ~74m');
+        assert(
+          maxObsM > 1420 && maxObsM <= TRACK_OBSTACLE_END_M,
+          `Obstacles extend into 1000m..1458m final stretch (maxObsM=${maxObsM})`
+        );
+        assert(
+          obstacles.some((o) => o.distanceM > 1000 && o.distanceM < 1200) &&
+            obstacles.some((o) => o.distanceM >= 1200 && o.distanceM <= 1458),
+          'No empty obstacle zone between 1000m and 1458m'
+        );
+
+        const rowSet = new Set(itemBoxes.map((b) => b.distanceM));
+        assert(rowSet.size === 10, 'All 10 Item Box station distances populated');
+        for (const stationM of ITEM_BOX_ROW_DISTANCES_M) {
+          assert(rowSet.has(stationM), `Item Box station at ${stationM}m exists`);
+          for (const obs of obstacles) {
+            assert(
+              Math.abs(obs.distanceM - stationM) >= ITEM_BOX_OBSTACLE_CLEARANCE_M,
+              `Obstacle at ${obs.distanceM}m respects clearance around Item Box station ${stationM}m`
+            );
+          }
+        }
+      }
+    }
+  );
+
+  // 29. Avalanche System သည် 1500m အထိ ပုံမှန်လိုက်နိုင်ပြီး အစောကြီးမဖမ်း / နောက်မကျန်ခဲ့ခြင်း
+  registerTest(
+    29,
+    'Avalanche System သည် 1500m အထိ ပုံမှန်လိုက်နိုင်ပြီး အစောကြီးမဖမ်း / နောက်မကျန်ခဲ့ခြင်း',
+    () => {
+      let state = advanceThroughCountdown(
+        createInitialMultiplayerRaceState({
+          players: TEST_PLAYERS_2,
+          trackSeed: 3141592,
+          initialPhase: 'countdown',
+        })
+      );
+
+      assertApprox(
+        state.avalanche.graceRemainingSec,
+        AVALANCHE_SAFE_GRACE_SEC,
+        0.01,
+        'Avalanche starts with 4.0s grace period'
+      );
+
+      // Step through full 1,500m race and audit Avalanche speed & gap past 1,000m
+      let observedPast1000mPursuit = false;
+      let tick = 0;
+      while (state.phase !== 'finished' && tick < 3400) {
+        tick += 1;
+        state = stepMultiplayerSnowRushTick(
+          state,
+          {
+            uid_alpha: { steer: tick % 16 < 8 ? -1 : 1, jumpPressed: tick % 30 === 0, useItemPressed: true, seq: tick },
+            uid_bravo: { steer: tick % 20 < 10 ? 1 : -1, jumpPressed: tick % 34 === 0, useItemPressed: true, seq: tick },
+          },
+          0.05
+        );
+
+        if (state.avalanche.isActive) {
+          assert(
+            state.avalanche.speedMps >= AVALANCHE_BASE_SPEED_MPS - 0.01 &&
+              state.avalanche.speedMps <= AVALANCHE_MAX_SPEED_MPS + 0.01,
+            `Avalanche speed bounded within [${AVALANCHE_BASE_SPEED_MPS}, ${AVALANCHE_MAX_SPEED_MPS}]`
+          );
+          assert(
+            state.avalanche.distanceM <= COURSE_LENGTH_M - 15 + 0.01,
+            'Avalanche upper clamp respects COURSE_LENGTH_M - 15 (1,485m)'
+          );
+        }
+
+        const trailingDist = Math.min(
+          state.racers.uid_alpha.distanceM,
+          state.racers.uid_bravo.distanceM
+        );
+        if (trailingDist > 1150 && trailingDist < 1450 && state.phase === 'racing') {
+          observedPast1000mPursuit = true;
+          const gap = trailingDist - state.avalanche.distanceM;
+          assert(
+            gap <= AVALANCHE_CATCHUP_MAX_GAP_M + 1.0,
+            `Avalanche keeps pursuing past 1,000m without falling >130m behind (gap=${gap}m)`
+          );
+        }
+      }
+
+      assert(observedPast1000mPursuit, 'Avalanche actively pursued racers in the 1,150m..1,450m zone');
+      assert(state.phase === 'finished', '1,500m race with Avalanche pursuit completed cleanly');
+    }
+  );
+
+  // 30. Offline Demo Bots နှစ်ဦးလုံး 1500m ပန်းဝင်မျဉ်းအထိ မှန်ကန်စွာ ကစားနိုင်ခြင်း
+  registerTest(
+    30,
+    'Offline Demo Bots နှစ်ဦးလုံး 1500m ပန်းဝင်မျဉ်းအထိ မှန်ကန်စွာ ကစားနိုင်ခြင်း',
+    () => {
+      let sp = startCountdownState(
+        createInitialSnowRushState({
+          playerName: 'သင်',
+          showOfflineBots: true,
+          trackSeed: 20260909,
+        }),
+        { trackSeed: 20260909 }
+      );
+
+      // Hold player slightly slower initially if needed, or step until bots reach 1,500m before player finishes
+      // Note: stepSnowRushSimulation freezes simulation once player finishes, so let's verify bots cross 1,000m AND reach 1,500m when player cruises slightly behind or alongside!
+      while (sp.phase === 'countdown') {
+        sp = stepSnowRushSimulation(
+          sp,
+          { steerLeft: false, steerRight: false, jumpPressed: false, useItemPressed: false },
+          0.05
+        );
+      }
+
+      let bot1Crossed1000 = false;
+      let bot2Crossed1000 = false;
+      let ticks = 0;
+      while (
+        ticks < 3600 &&
+        sp.offlineDemoBots.some((b) => b.finishTimeMs === null)
+      ) {
+        ticks += 1;
+        // Keep local player safely just behind bots until bots cross 1,500m so the local prototype loop stays in 'racing'
+        if (sp.player.distanceM > 1420 && sp.offlineDemoBots.some((b) => b.finishTimeMs === null)) {
+          sp = {
+            ...sp,
+            player: { ...sp.player, distanceM: 1420, speedMps: 18.0 },
+          };
+        }
+        sp = stepSnowRushSimulation(
+          sp,
+          {
+            steerLeft: ticks % 16 < 8,
+            steerRight: ticks % 16 >= 8,
+            jumpPressed: ticks % 32 === 0,
+            useItemPressed: true,
+          },
+          0.05
+        );
+        if (sp.offlineDemoBots[0].distanceM > 1000 && sp.offlineDemoBots[0].finishTimeMs === null) {
+          bot1Crossed1000 = true;
+        }
+        if (sp.offlineDemoBots[1].distanceM > 1000 && sp.offlineDemoBots[1].finishTimeMs === null) {
+          bot2Crossed1000 = true;
+        }
+      }
+
+      assert(bot1Crossed1000 && bot2Crossed1000, 'Both Offline Demo Bots continued racing past 1,000m without stopping');
+      assert(
+        sp.offlineDemoBots.every((b) => b.distanceM === 1500 && b.finishTimeMs !== null),
+        'Both Offline Demo Bots reached the 1,500m Finish Line cleanly'
       );
     }
   );

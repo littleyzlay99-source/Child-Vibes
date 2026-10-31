@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import {
   CANVAS_MAX_DPR,
+  COURSE_LENGTH_KM_TEXT,
   COURSE_LENGTH_M,
   DISTANCE_MARKER_INTERVAL_M,
   HUD_SYNC_INTERVAL_MS,
@@ -217,7 +218,7 @@ function drawGateBanner(
     ctx.stroke();
     ctx.setLineDash([]);
 
-    const text = `${distanceM} m · ${(distanceM / 1000).toFixed(1)} km`;
+    const text = `${distanceM} m · ${(distanceM / 1000).toFixed(2)} KM`;
     ctx.font = '800 11px system-ui, -apple-system, sans-serif';
     const labelW = Math.max(96, ctx.measureText(text).width + 20);
     ctx.fillStyle = 'rgba(255, 255, 255, 0.82)';
@@ -234,7 +235,10 @@ function drawGateBanner(
     ctx.fillText(text, centerX, y + 0.5);
 
     [trackLeft + 6, trackRight - 6].forEach((poleX, idx) => {
-      const flagColor = (distanceM / 100 + idx) % 2 === 0 ? '#F97316' : '#0EA5E9';
+      const flagColor =
+        (Math.round(distanceM / DISTANCE_MARKER_INTERVAL_M) + idx) % 2 === 0
+          ? '#F97316'
+          : '#0EA5E9';
       ctx.strokeStyle = '#334155';
       ctx.lineWidth = 2.5;
       ctx.beginPath();
@@ -301,7 +305,9 @@ function drawGateBanner(
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(
-    kind === 'finish' ? '🏁 FINISH · 1.00 KM (ပန်းဝင်မျဉ်း)' : '🏂 START · 0.00 KM (တာထွက်မျဉ်း)',
+    kind === 'finish'
+      ? `🏁 FINISH · ${COURSE_LENGTH_KM_TEXT} KM (ပန်းဝင်မျဉ်း)`
+      : '🏂 START · 0.00 KM (တာထွက်မျဉ်း)',
     centerX,
     y - pillarH + bannerH / 2 - 5.5
   );
@@ -466,7 +472,7 @@ function renderDownhillSlopeWorld(
     }
   }
 
-  // 5. Start Gate (0 m), 100m Checkpoints, and Finish Gate (1,000 m)
+  // 5. Start Gate (0 m), 250m Quarter-KM Checkpoints (0.25..1.25 KM), and Finish Gate (1,500 m / 1.50 KM)
   const firstMarkerM =
     Math.max(0, Math.floor(minVisibleM / DISTANCE_MARKER_INTERVAL_M)) *
     DISTANCE_MARKER_INTERVAL_M;

@@ -12,6 +12,7 @@ import { getAllGames, getAvailableGames, getGameById } from '../../registry';
 import { snakesAndLaddersModule } from '../../snakes-and-ladders/SnakesAndLaddersModule';
 import type { GameRoom, RoomPlayer } from '../../../types';
 import type { GameModuleGameplayProps } from '../../types';
+import { COURSE_CHECKPOINT_METERS, COURSE_LENGTH_KM_TEXT, COURSE_LENGTH_M } from '../constants';
 import { RaceProgressBar } from '../components/RaceProgressBar';
 import { SnowRushMultiplayerPodium } from '../components/SnowRushMultiplayerPodium';
 import {
@@ -54,6 +55,7 @@ import {
   SnowRushMultiplayerView,
   evaluateMultiplayerRoomGuard,
 } from '../SnowRushMultiplayerView';
+import { SnowRushPrototypeView } from '../SnowRushGame';
 import { snowRushModule } from '../SnowRushModule';
 
 /**
@@ -750,14 +752,14 @@ async function runTests(): Promise<void> {
       trackSeed: 555666,
     });
     race.phase = 'racing';
-    race.elapsedRaceMs = 49250;
-    race.racers.uid_1.distanceM = 1000;
-    race.racers.uid_1.finishTimeMs = 46800;
+    race.elapsedRaceMs = 74250;
+    race.racers.uid_1.distanceM = COURSE_LENGTH_M;
+    race.racers.uid_1.finishTimeMs = 71800;
     race.racers.uid_1.finishRank = 1;
-    race.racers.uid_2.distanceM = 1000;
-    race.racers.uid_2.finishTimeMs = 49250;
+    race.racers.uid_2.distanceM = COURSE_LENGTH_M;
+    race.racers.uid_2.finishTimeMs = 74250;
     race.racers.uid_2.finishRank = 2;
-    race.racers.uid_3.distanceM = 912.4;
+    race.racers.uid_3.distanceM = 1312.4;
 
     race = finalizeMultiplayerRace(race, 'post_winner_timeout');
     const finalSnap = buildMultiplayerSnapshot(race);
@@ -778,6 +780,8 @@ async function runTests(): Promise<void> {
     assert.ok(podiumHtml.includes('ချမ်းမြေ့ (သင်)'), 'Local player tag rendered');
     assert.ok(podiumHtml.includes('မင်းခန့်'), 'Rank 3 player rendered');
     assert.ok(podiumHtml.includes('#1') && podiumHtml.includes('#2') && podiumHtml.includes('#3'));
+    assert.ok(podiumHtml.includes('1.50 km'), 'Finished racers display 1.50 km');
+    assert.ok(!podiumHtml.includes('1.00 km'), 'Old 1.00 km finish label is completely removed');
     assert.ok(
       podiumHtml.includes(formatMultiplayerFinishReasonMm('post_winner_timeout')),
       'Burmese finish reason rendered'
@@ -785,7 +789,7 @@ async function runTests(): Promise<void> {
     assert.ok(podiumHtml.includes('Display-Only Multiplayer'), 'Display-Only notice rendered');
     assert.ok(podiumHtml.includes('အခန်းမှ ထွက်မည်'), 'Exit Room button rendered');
     passed += 1;
-    console.log('PASS [10/13] Authoritative race_finished Podium UI renders Winner, Rank 1–4 & Exit');
+    console.log('PASS [10/14] Authoritative race_finished Podium UI renders Winner, 1.50 km & Exit');
   }
 
   // ---------------------------------------------------------------------------
@@ -871,10 +875,75 @@ async function runTests(): Promise<void> {
     });
     assert.ok(typeof ruleSummary === 'string' && ruleSummary.length > 0);
     passed += 1;
-    console.log('PASS [13/13] Snakes & Ladders module regression check');
+    console.log('PASS [13/14] Snakes & Ladders module regression check');
   }
 
-  console.log(`\nStep 4.8 Automated Frontend Integration Suite: ${passed}/13 PASSED.`);
+  // ---------------------------------------------------------------------------
+  // Test 14: 1.50 KM (1,500 m) HUD Progress, Quarter-KM Checkpoints & Local/MP Copy
+  // ---------------------------------------------------------------------------
+  {
+    assert.equal(COURSE_LENGTH_M, 1500);
+    assert.equal(COURSE_LENGTH_KM_TEXT, '1.50');
+    assert.deepEqual(COURSE_CHECKPOINT_METERS, [250, 500, 750, 1000, 1250]);
+
+    assert.ok(snowRushModule.instructionsMm.includes('1.50 km'));
+    assert.ok(!snowRushModule.instructionsMm.includes('1.00 km'));
+    const snowRuleSummary = snowRushModule.getRuleSummaryMm?.({
+      exactFinish: false,
+      maxPlayers: 4,
+    });
+    assert.ok(snowRuleSummary?.includes('၁.၅၀ ကီလိုမီတာ'));
+    assert.ok(formatMultiplayerFinishReasonMm('all_finished').includes('1.50 km'));
+
+    // Progress at 1,000m is 66.7% (NOT 100%) and race remains in 'racing' phase
+    let mpAt1000 = createInitialMultiplayerRaceState({
+      players: [
+        { uid: 'u1', displayName: 'အောင်', color: '#EF4444' },
+        { uid: 'u2', displayName: 'မေ', color: '#0EA5E9' },
+      ],
+      trackSeed: 150099,
+    });
+    mpAt1000.phase = 'racing';
+    mpAt1000.racers.u1.distanceM = 1000;
+    mpAt1000.racers.u2.distanceM = 750;
+    const snap1000 = buildMultiplayerSnapshot(mpAt1000);
+    const { hud: hud1000, extras: extras1000 } = buildMultiplayerHudSnapshot(snap1000, 'u1');
+    assert.equal(hud1000.distanceKmText, '1.00');
+    assert.equal(hud1000.courseLengthKmText, '1.50');
+    assert.ok(Math.abs(hud1000.progressPercent - 66.6667) < 0.05);
+    assert.equal(extras1000.localFinished, false);
+
+    const barHtml = renderToStaticMarkup(
+      React.createElement(RaceProgressBar, {
+        hud: hud1000,
+        soundEnabled: true,
+        onToggleSound: () => {},
+        isMultiplayer: true,
+        multiplayerExtras: extras1000,
+      })
+    );
+    assert.ok(barHtml.includes('aria-valuemax="1500"'), 'Progress bar aria-valuemax is 1500');
+    assert.ok(barHtml.includes('1.50 km'), 'Finish line label shows 1.50 km');
+    for (const cp of ['0.25 km (250 m)', '0.50 km (500 m)', '0.75 km (750 m)', '1.00 km (1000 m)', '1.25 km (1250 m)']) {
+      assert.ok(barHtml.includes(cp), `Progress bar includes checkpoint marker ${cp}`);
+    }
+
+    // Local Prototype View ready overlay shows 1.50 km (1,500 m)
+    const protoHtml = renderToStaticMarkup(
+      React.createElement(SnowRushPrototypeView, {
+        playerDisplayName: 'စမ်းသပ်သူ',
+        instructionsMm: snowRushModule.instructionsMm,
+      })
+    );
+    assert.ok(protoHtml.includes('1.50 km'), 'Local Prototype View shows 1.50 km');
+    assert.ok(protoHtml.includes('1,500 m'), 'Local Prototype View shows 1,500 m');
+    assert.ok(protoHtml.includes('Start 1.50 km Race'), 'Start button shows Start 1.50 km Race');
+
+    passed += 1;
+    console.log('PASS [14/14] 1.50 KM (1,500 m) HUD, quarter-km checkpoints & Local/MP UI verified');
+  }
+
+  console.log(`\nStep 4.8 + 1.50 KM Automated Frontend Integration Suite: ${passed}/14 PASSED.`);
 }
 
 runTests()

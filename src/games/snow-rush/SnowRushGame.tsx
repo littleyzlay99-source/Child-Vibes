@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { sounds } from '../../lib/sound';
 import type { GameModuleGameplayProps } from '../types';
+import { COURSE_LENGTH_KM_TEXT, COURSE_LENGTH_M } from './constants';
 import { RaceProgressBar } from './components/RaceProgressBar';
 import { TouchControlsOverlay } from './components/TouchControlsOverlay';
 import { SnowRushMultiplayerView } from './SnowRushMultiplayerView';
@@ -457,7 +458,7 @@ export const SnowRushPrototypeView: React.FC<SnowRushPrototypeViewProps> = ({
 
   return (
     <div className="relative flex-1 w-full h-full min-h-[460px] flex flex-col overflow-hidden bg-sky-100 text-slate-900">
-      {/* Top Progress HUD (0.00 km / 1.00 km + Held Item Slot + Avalanche Proximity + Speed + Restart Demo) */}
+      {/* Top Progress HUD (0.00 km / 1.50 km + Held Item Slot + Avalanche Proximity + Speed + Restart Demo) */}
       <RaceProgressBar
         hud={hud}
         soundEnabled={soundEnabled}
@@ -505,7 +506,8 @@ export const SnowRushPrototypeView: React.FC<SnowRushPrototypeViewProps> = ({
                     နှင်းတောင်ဆင်းပြိုင်ပွဲ
                   </h2>
                   <p className="text-xs font-bold text-slate-500">
-                    Snow Rush: Avalanche Escape · 1.00 km (1,000 m)
+                    Snow Rush: Avalanche Escape · {COURSE_LENGTH_KM_TEXT} km (
+                    {COURSE_LENGTH_M.toLocaleString('en-US')} m)
                   </p>
                 </div>
                 <div className="w-12 h-12 rounded-2xl bg-sky-50 border border-sky-200 flex items-center justify-center text-2xl shrink-0">
@@ -515,7 +517,7 @@ export const SnowRushPrototypeView: React.FC<SnowRushPrototypeViewProps> = ({
 
               <p className="text-xs text-slate-600 leading-relaxed">
                 {instructionsMm ||
-                  'အတားအဆီးများကို ရှောင်တိမ်း၊ Item Box များကောက်ယူပြီး နှင်းပြိုလှိုင်း (Avalanche) မမီမီ 1.00 km ပန်းဝင်မျဉ်းသို့ အမြန်ဆုံး ဆင်းပြိုင်ပါ။'}
+                  `အတားအဆီးများကို ရှောင်တိမ်း၊ Item Box များကောက်ယူပြီး နှင်းပြိုလှိုင်း (Avalanche) မမီမီ ${COURSE_LENGTH_KM_TEXT} km ပန်းဝင်မျဉ်းသို့ အမြန်ဆုံး ဆင်းပြိုင်ပါ။`}
               </p>
 
               {/* Course Obstacles, Battle Items & Avalanche Guide */}
@@ -588,13 +590,13 @@ export const SnowRushPrototypeView: React.FC<SnowRushPrototypeViewProps> = ({
                 className="w-full min-h-[48px] py-3 rounded-2xl bg-amber-400 hover:bg-amber-500 active:scale-[0.99] text-slate-950 font-black text-sm flex items-center justify-center gap-2 shadow-md transition cursor-pointer"
               >
                 <Play className="w-4 h-4 fill-current" />
-                <span>စတင်စမ်းသပ်ကစားမည် (Start 1.00 km Race)</span>
+                <span>စတင်စမ်းသပ်ကစားမည် (Start {COURSE_LENGTH_KM_TEXT} km Race)</span>
               </button>
             </div>
           </div>
         )}
 
-        {/* Phase 4: Finish Summary Overlay at 1,000 m */}
+        {/* Phase 4: Finish Summary Overlay at 1,500 m */}
         {hud.phase === 'finished' && (
           <div className="absolute inset-0 z-30 flex items-center justify-center p-3 sm:p-6 bg-slate-950/40 backdrop-blur-[2px]">
             <div className="w-full max-w-md bg-white/95 border border-slate-200 rounded-3xl p-5 sm:p-6 shadow-2xl space-y-4 text-center">
@@ -605,7 +607,7 @@ export const SnowRushPrototypeView: React.FC<SnowRushPrototypeViewProps> = ({
               <div>
                 <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md bg-emerald-100 border border-emerald-300 text-emerald-900 text-[11px] font-black">
                   <Flag className="w-3 h-3" />
-                  <span>1.00 km ပန်းဝင်အောင်မြင်ပြီ!</span>
+                  <span>{COURSE_LENGTH_KM_TEXT} km ပန်းဝင်အောင်မြင်ပြီ!</span>
                 </span>
                 <h3 className="text-xl sm:text-2xl font-black text-slate-900 mt-1.5">
                   နှင်းတောင်ဆင်းပြိုင်ပွဲ ပြီးဆုံးပါပြီ

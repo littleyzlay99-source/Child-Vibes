@@ -746,7 +746,7 @@ export function translateMultiplayerEventsForClient(
 export function formatMultiplayerFinishReasonMm(reason: RaceFinishReason | null): string {
   switch (reason) {
     case 'all_finished':
-      return 'ကစားသမားအားလုံး 1.00 km ပန်းဝင်မျဉ်းသို့ ရောက်ရှိပြီးစီးပါပြီ။';
+      return `ကစားသမားအားလုံး ${COURSE_LENGTH_KM_TEXT} km ပန်းဝင်မျဉ်းသို့ ရောက်ရှိပြီးစီးပါပြီ။`;
     case 'post_winner_timeout':
       return 'ပထမဆုရှင် ပန်းဝင်ပြီး ၁၅ စက္ကန့် အချိန်ပြည့်၍ ပြိုင်ပွဲပြီးဆုံးပါပြီ။';
     default:

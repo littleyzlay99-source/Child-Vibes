@@ -5,9 +5,10 @@ import type { SnowRushItemId, SnowRushItemMetadata } from './types';
  * All speed, obstacle, collision, avalanche, recovery, and battle item balance values live here.
  */
 
-export const COURSE_LENGTH_M = 1000;
-export const COURSE_LENGTH_KM_TEXT = '1.00';
-export const DISTANCE_MARKER_INTERVAL_M = 100;
+export const COURSE_LENGTH_M = 1500;
+export const COURSE_LENGTH_KM_TEXT = '1.50';
+export const DISTANCE_MARKER_INTERVAL_M = 250;
+export const COURSE_CHECKPOINT_METERS: readonly number[] = [250, 500, 750, 1000, 1250];
 
 export const COUNTDOWN_DURATION_SEC = 2.7; // 3 crisp 0.9s beats: 3 -> 2 -> 1 -> GO!
 export const COUNTDOWN_BEAT_SEC = 0.9;
@@ -31,7 +32,7 @@ export const RACER_COLLISION_HALF_LENGTH_M = 0.95;
 // Discrete Track Lanes (5 lanes across [-0.86, +0.86])
 export const TRACK_LANE_CENTERS: readonly number[] = [-0.64, -0.32, 0.0, 0.32, 0.64];
 export const TRACK_OBSTACLE_START_M = 74;
-export const TRACK_OBSTACLE_END_M = 958;
+export const TRACK_OBSTACLE_END_M = COURSE_LENGTH_M - 42; // 1,458m -> leaves a clean 42m finish sprint to 1,500m
 export const MIN_OPEN_LANES_PER_ROW = 2;
 
 // Normal Jump & Jump Ramp Parameters
@@ -82,7 +83,7 @@ export const AVALANCHE_DANGER_GAP_M = 35;
 export const SNOW_TUMBLE_DURATION_SEC = 1.3;
 export const SNOW_TUMBLE_DRIFT_SPEED_MPS = 6.2;
 export const SNOW_TUMBLE_RECOVERY_AHEAD_M = 25; // Reposition 25m ahead of Avalanche
-export const SNOW_TUMBLE_MAX_RECOVERY_M = COURSE_LENGTH_M - 5; // Never exceed or false-finish 1000m
+export const SNOW_TUMBLE_MAX_RECOVERY_M = COURSE_LENGTH_M - 5; // Never exceed or false-finish 1,500m
 export const POST_TUMBLE_INVULN_SEC = 2.0; // 2.0s post-recovery invulnerability
 export const RECOVERY_INITIAL_SPEED_MPS = 10.8;
 export const RECOVERY_SPEED_RAMP_SEC = 1.5; // Staged speed recovery ramp
@@ -91,8 +92,10 @@ export const RECOVERY_SPEED_RAMP_SEC = 1.5; // Staged speed recovery ramp
 // Step 4.4 — Battle Items, Power-ups & Anti-Stun-Lock Balance Constants
 // ============================================================================
 
-// Item Box World Rows along the 1,000m Track (3-4 deterministic boxes per row)
-export const ITEM_BOX_ROW_DISTANCES_M: readonly number[] = [140, 280, 420, 560, 700, 840];
+// Item Box World Rows along the 1,500m Track (10 deterministic stations x 3-4 boxes per row)
+export const ITEM_BOX_ROW_DISTANCES_M: readonly number[] = [
+  140, 280, 420, 560, 700, 840, 980, 1120, 1260, 1400,
+];
 export const ITEM_BOX_OBSTACLE_CLEARANCE_M = 6.8; // Keeps obstacles off Item Box rows
 export const ITEM_BOX_HALF_LENGTH_M = 1.35;
 export const ITEM_BOX_HALF_WIDTH_LANE = 0.115;

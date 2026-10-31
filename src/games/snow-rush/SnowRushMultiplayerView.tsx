@@ -4,7 +4,7 @@ import { auth } from '../../lib/firebase';
 import { sounds } from '../../lib/sound';
 import type { GameRoom } from '../../types';
 import type { GameModuleGameplayProps } from '../types';
-import { MAX_VISUAL_BURSTS } from './constants';
+import { COURSE_LENGTH_KM_TEXT, MAX_VISUAL_BURSTS } from './constants';
 import { RaceProgressBar } from './components/RaceProgressBar';
 import { SnowRushMultiplayerPodium } from './components/SnowRushMultiplayerPodium';
 import { SnowRushNetworkStatusBanner } from './components/SnowRushNetworkStatusBanner';
@@ -721,7 +721,7 @@ export const SnowRushMultiplayerView: React.FC<SnowRushMultiplayerViewProps> = (
             <div className="inline-flex items-center gap-2 rounded-2xl border border-emerald-300/60 bg-slate-950/85 px-4 py-2 text-xs font-bold text-emerald-200 shadow-lg backdrop-blur-md">
               <Flag className="w-4 h-4 text-amber-300 shrink-0" />
               <span>
-                1.00 km ပန်းဝင်ပြီး! အခြားကစားသမားများ ပန်းဝင်ရန် စောင့်ဆိုင်းနေသည်
+                {COURSE_LENGTH_KM_TEXT} km ပန်းဝင်ပြီး! အခြားကစားသမားများ ပန်းဝင်ရန် စောင့်ဆိုင်းနေသည်
                 {hudExtras.finishWindowRemainingSec !== null
                   ? ` (${Math.max(1, Math.ceil(hudExtras.finishWindowRemainingSec))}s)`
                   : '...'}
