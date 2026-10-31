@@ -243,6 +243,14 @@ export type SessionRecoveryOutcome =
   | { status: 'offline_keep'; roomId: string; room: null }
   | { status: 'invalid'; roomId: null; room: null };
 
+export function shouldClaimSessionMatchReward(
+  room: Pick<GameRoom, 'gameType' | 'status' | 'winnerId'> | null | undefined
+): boolean {
+  if (!room) return false;
+  if (room.gameType === 'snow_rush') return false;
+  return room.status === 'finished' && Boolean(room.winnerId);
+}
+
 /**
  * Verify a candidate room session against Firestore using a single document read (Spark Free Plan frugal).
  * - Preserves session if device is temporarily offline (never kicks player on connection drop)
@@ -276,7 +284,7 @@ export async function verifyAndRecoverGameSession(
 
     // Must still be a room member and match must still be active ('waiting', 'full', or 'playing')
     if (!isMember || rawRoom.status === 'finished') {
-      if (isMember && rawRoom.status === 'finished' && rawRoom.winnerId) {
+      if (isMember && shouldClaimSessionMatchReward(rawRoom)) {
         try {
           await claimMatchReward(
             rawRoom.id || candidateRoomId,

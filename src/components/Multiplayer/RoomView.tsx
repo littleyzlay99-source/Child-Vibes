@@ -51,6 +51,32 @@ interface ConfirmedPlayerState {
   updatedAtMs: number;
 }
 
+/**
+ * Turn-based Firestore presence heartbeats, 60s reconnection grace timers, and 30s turn skips
+ * apply ONLY to turn-based Firestore rooms (e.g. `snakes_and_ladders`).
+ * `snow_rush` manages real-time presence & connection inside its Cloudflare Durable Object WebSocket.
+ */
+export function shouldUseTurnBasedFirestoreRoomLifecycle(
+  gameType?: string | null
+): boolean {
+  return Boolean(gameType) && gameType !== 'snow_rush';
+}
+
+/**
+ * Phase 1 Public Security Policy: `snow_rush` never claims XP / Points match rewards.
+ */
+export function shouldAutoClaimRoomMatchReward(
+  room: Pick<GameRoom, 'gameType' | 'status' | 'winnerId'> | null | undefined
+): boolean {
+  if (!room) return false;
+  if (room.gameType === 'snow_rush') return false;
+  return (
+    room.status === 'finished' &&
+    Boolean(room.winnerId) &&
+    isGameModulePlayable(room.gameType)
+  );
+}
+
 export const RoomView: React.FC<RoomViewProps> = ({
   roomId,
   initialRoom,
@@ -285,10 +311,27 @@ export const RoomView: React.FC<RoomViewProps> = ({
     };
   }, [roomId]);
 
-  // Isolated Player Presence & Heartbeat + Mobile Tab Switch / Screen Lock / Network Recovery
+  // Browser online/offline indicator (zero Firestore writes)
+  useEffect(() => {
+    const handleOnlineStatus = () => setIsOnline(true);
+    const handleOfflineStatus = () => setIsOnline(false);
+
+    window.addEventListener('online', handleOnlineStatus);
+    window.addEventListener('offline', handleOfflineStatus);
+
+    return () => {
+      window.removeEventListener('online', handleOnlineStatus);
+      window.removeEventListener('offline', handleOfflineStatus);
+    };
+  }, []);
+
+  // Isolated Turn-Based Firestore Presence & Heartbeat (Disabled for `snow_rush`)
+  const activeGameType = room?.gameType;
   useEffect(() => {
     const uid = currentUser?.uid;
-    if (!uid || !roomId) return;
+    if (!uid || !roomId || !shouldUseTurnBasedFirestoreRoomLifecycle(activeGameType)) {
+      return;
+    }
 
     // Initial reconnect check
     if (navigator.onLine) {
@@ -302,12 +345,10 @@ export const RoomView: React.FC<RoomViewProps> = ({
     }, 12000);
 
     const handleOnline = () => {
-      setIsOnline(true);
       reconnectPlayerToRoom(roomId, uid);
     };
 
     const handleOffline = () => {
-      setIsOnline(false);
       markPlayerDisconnected(roomId, uid);
     };
 
@@ -331,11 +372,16 @@ export const RoomView: React.FC<RoomViewProps> = ({
       document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
       window.removeEventListener('focus', handleVisibilityOrFocus);
     };
-  }, [roomId, currentUser?.uid]);
+  }, [roomId, currentUser?.uid, activeGameType]);
 
-  // Monitor Reconnection Deadline (60 Seconds)
+  // Monitor Reconnection Deadline (60 Seconds — Turn-Based Games Only)
   useEffect(() => {
-    if (!room?.reconnectionDeadline) return;
+    if (
+      !room?.reconnectionDeadline ||
+      !shouldUseTurnBasedFirestoreRoomLifecycle(room.gameType)
+    ) {
+      return;
+    }
 
     const interval = setInterval(() => {
       const now = Date.now();
@@ -348,13 +394,13 @@ export const RoomView: React.FC<RoomViewProps> = ({
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [room?.reconnectionDeadline, roomId]);
+  }, [room?.reconnectionDeadline, room?.gameType, roomId]);
 
-  // When game finishes, idempotently claim server-verified XP & Points once per match round
+  // When game finishes, idempotently claim server-verified XP & Points once per match round (Never for `snow_rush`)
   useEffect(() => {
     if (!room || !currentUser?.uid) return;
 
-    if (room.status === 'finished' && room.winnerId && isGameModulePlayable(room.gameType)) {
+    if (shouldAutoClaimRoomMatchReward(room)) {
       const roundKey = `${roomId}_r${room.gameRound || 1}_${currentUser.uid}`;
       if (claimedRoundKeyRef.current === roundKey) {
         return;
@@ -380,7 +426,7 @@ export const RoomView: React.FC<RoomViewProps> = ({
           }
           setIsClaimingReward(false);
         });
-    } else if (room.status !== 'finished') {
+    } else if (room.status !== 'finished' || room.gameType === 'snow_rush') {
       claimedRoundKeyRef.current = null;
       setRewardOutcome(null);
       setIsClaimingReward(false);
@@ -502,7 +548,10 @@ export const RoomView: React.FC<RoomViewProps> = ({
   };
 
   const handleTurnTimeoutTrigger = async () => {
-    if (room.status === 'playing') {
+    if (
+      room.status === 'playing' &&
+      shouldUseTurnBasedFirestoreRoomLifecycle(room.gameType)
+    ) {
       try {
         await handleTurnTimeout(roomId);
       } catch (err) {
@@ -512,7 +561,7 @@ export const RoomView: React.FC<RoomViewProps> = ({
   };
 
   const handlePlayAgain = async () => {
-    if (!isHost) return;
+    if (!isHost || room.gameType === 'snow_rush') return;
     sounds.playClick();
     await resetRoomToPlayAgain(roomId);
   };

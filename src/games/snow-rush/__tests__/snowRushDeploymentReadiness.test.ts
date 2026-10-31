@@ -140,8 +140,9 @@ async function runStep49ReadinessSuite(): Promise<void> {
     assert(
       workerWrangler.includes('https://child-vibes3050.pages.dev') &&
         workerWrangler.includes('https://*.child-vibes3050.pages.dev') &&
-        !workerWrangler.includes('child-vibes.pages.dev'),
-      'Worker wrangler.toml ALLOWED_ORIGINS must target child-vibes3050.pages.dev (never child-vibes.pages.dev)'
+        !workerWrangler.includes('child-vibes.pages.dev') &&
+        !workerWrangler.includes('http://localhost:3000'),
+      'Worker wrangler.toml ALLOWED_ORIGINS must target child-vibes3050.pages.dev and exclude http://localhost:3000'
     );
     assert(
       workerPkg.name === 'child-vibes-snow-rush-server' && workerPkg.private === true,
@@ -268,11 +269,15 @@ async function runStep49ReadinessSuite(): Promise<void> {
       'child-vibes.pages.dev patterns must NEVER match child-vibes3050.pages.dev'
     );
 
-    // 3d. Full configured wrangler.toml allowlist check
-    const allowlist = parseAllowedOrigins(
-      'https://child-vibes3050.pages.dev/, https://*.child-vibes3050.pages.dev, https://ais-dev-qw4gg4jal2u3tup36rro7r-1033756722286.asia-southeast1.run.app, https://ais-pre-qw4gg4jal2u3tup36rro7r-1033756722286.asia-southeast1.run.app, http://localhost:3000'
+    // 3d. Full configured wrangler.toml allowlist check (Step 10.2: localhost:3000 removed)
+    const workerWranglerRaw = fs.readFileSync(
+      path.join(WORKSPACE_ROOT, 'workers/snow-rush-server/wrangler.toml'),
+      'utf8'
     );
-    assert(allowlist.length === 5, 'Must parse 5 normalized allowed origins');
+    const originsMatch = workerWranglerRaw.match(/ALLOWED_ORIGINS\s*=\s*"([^"]+)"/);
+    assert(originsMatch && originsMatch[1], 'ALLOWED_ORIGINS must be present in wrangler.toml');
+    const allowlist = parseAllowedOrigins(originsMatch[1]);
+    assert(allowlist.length === 4, 'Must parse 4 hardened production/preview/AI-Studio origins');
     assert(
       isOriginAllowed('https://child-vibes3050.pages.dev', allowlist),
       'Exact child-vibes3050 Pages production origin must be allowed'
@@ -296,8 +301,8 @@ async function runStep49ReadinessSuite(): Promise<void> {
       'AI Studio shared preview origin must be allowed'
     );
     assert(
-      isOriginAllowed('http://localhost:3000', allowlist),
-      'Localhost:3000 dev origin must be allowed'
+      !isOriginAllowed('http://localhost:3000', allowlist),
+      'Localhost:3000 dev origin must be rejected in hardened production Worker allowlist'
     );
     assert(
       !isOriginAllowed('https://evilchild-vibes3050.pages.dev', allowlist),

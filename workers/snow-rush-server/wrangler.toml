@@ -22,5 +22,5 @@ FIREBASE_PROJECT_ID = "gen-lang-client-0335200904"
 FIRESTORE_DATABASE_ID = "ai-studio-47dffdd9-9dac-40e5-b320-95d71826db89"
 SNAPSHOT_BROADCAST_HZ = "10"
 # Verified Origin allowlist separating Production (`https://child-vibes3050.pages.dev`),
-# Cloudflare Pages Preview subdomains (`https://*.child-vibes3050.pages.dev`), AI Studio preview URLs, and local Vite dev.
-ALLOWED_ORIGINS = "https://child-vibes3050.pages.dev,https://*.child-vibes3050.pages.dev,https://ais-dev-qw4gg4jal2u3tup36rro7r-1033756722286.asia-southeast1.run.app,https://ais-pre-qw4gg4jal2u3tup36rro7r-1033756722286.asia-southeast1.run.app,http://localhost:3000"
+# Cloudflare Pages Preview subdomains (`https://*.child-vibes3050.pages.dev`), and AI Studio preview URLs.
+ALLOWED_ORIGINS = "https://child-vibes3050.pages.dev,https://*.child-vibes3050.pages.dev,https://ais-dev-qw4gg4jal2u3tup36rro7r-1033756722286.asia-southeast1.run.app,https://ais-pre-qw4gg4jal2u3tup36rro7r-1033756722286.asia-southeast1.run.app"

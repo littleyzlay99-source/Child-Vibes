@@ -900,17 +900,19 @@ export async function togglePlayerReady(roomId: string, userId: string, isReady:
       const roomSnap = await transaction.get(roomRef);
       if (!roomSnap.exists()) return;
       const room = roomSnap.data() as GameRoom;
+      if (room.status === 'finished') return;
       const maxPlayers = normalizeMaxPlayers(room.maxPlayers);
 
       const uniquePlayers = deduplicateRoomPlayers(room.players, room.playerPositions, txNow);
+      if (!uniquePlayers.some((p) => p.uid === userId)) return;
 
       const updatedPlayers = uniquePlayers.map((p) =>
         p.uid === userId ? sanitizePlayer(p, txNow, { isReady }) : p
       );
 
       const nextStatus: RoomStatus =
-        room.status === 'playing' || room.status === 'finished'
-          ? room.status
+        room.status === 'playing'
+          ? 'playing'
           : computeLobbyStatus(updatedPlayers.length, maxPlayers);
 
       transaction.update(roomRef, {
@@ -940,10 +942,14 @@ export async function startGame(roomId: string) {
       if (!roomSnap.exists()) return;
       const room = roomSnap.data() as GameRoom;
 
+      const callerUid = auth.currentUser?.uid;
+      if (callerUid && room.hostId !== callerUid) return;
       if (room.status !== 'waiting' && room.status !== 'full') return;
 
+      const maxPlayers = normalizeMaxPlayers(room.maxPlayers);
       const uniquePlayers = deduplicateRoomPlayers(room.players, room.playerPositions, txNow);
-      if (uniquePlayers.length < 2) return;
+      if (uniquePlayers.length < 2 || uniquePlayers.length > maxPlayers) return;
+      if (!uniquePlayers.every((p) => (p.uid === room.hostId ? true : p.isReady))) return;
 
       const resetStartPlayers = uniquePlayers.map((p) =>
         sanitizePlayer(p, txNow, {
@@ -960,8 +966,8 @@ export async function startGame(roomId: string) {
         playerCount: resetStartPlayers.length,
         playerPositions: buildPlayerPositionsMap(resetStartPlayers, txNow),
         currentTurnIndex: 0,
-        turnStartTimestamp: txNow,
-        turnDeadline: txNow + 30000, // 30 seconds for first turn
+        turnStartTimestamp: room.gameType === 'snow_rush' ? 0 : txNow,
+        turnDeadline: room.gameType === 'snow_rush' ? 0 : txNow + 30000, // 30 seconds for turn-based games
         reconnectionDeadline: null,
         disconnectedPlayerId: null,
         disconnectedPlayerName: null,
@@ -973,7 +979,10 @@ export async function startGame(roomId: string) {
         matchParticipantIds: resetStartPlayers.map((p) => p.uid),
         gameRound: (room.gameRound || 1) + 1,
         stateVersion: (room.stateVersion || 1) + 1,
-        lastMoveSummary: 'ဂိမ်းစတင်ပါပြီ! ပထမဆုံး ကစားသမား အံစာတုံး စတင်ခေါက်ပါ!',
+        lastMoveSummary:
+          room.gameType === 'snow_rush'
+            ? 'Snow Rush ပြိုင်ပွဲ စတင်ပါပြီ!'
+            : 'ဂိမ်းစတင်ပါပြီ! ပထမဆုံး ကစားသမား အံစာတုံး စတင်ခေါက်ပါ!',
         updatedAt: new Date(txNow).toISOString(),
         serverUpdatedAt: serverTimestamp(),
       });
@@ -987,6 +996,172 @@ export async function startGame(roomId: string) {
  * Leave Room (Atomic Transaction preserving all remaining players' exact positions
  * and freeing room capacity from 'full' back to 'waiting' when in lobby)
  */
+/**
+ * Pure deterministic room-leave transition calculator shared by `leaveGameRoom` and tests.
+ * - For `snow_rush` (Phase 1): NEVER sets `status = 'finished'` and NEVER sets `winnerId` / `winnerName`.
+ *   When 0 players remain, deletes the room; when 1 player remains during `playing`, returns to `'waiting'`.
+ * - For `snakes_and_ladders` (and turn-based games): preserves 100% identical forfeit-win and lobby behavior.
+ */
+export function computeGameRoomLeaveOutcome(params: {
+  readonly room: GameRoom;
+  readonly leavingUserId: string;
+  readonly now: number;
+}):
+  | { readonly action: 'noop' }
+  | { readonly action: 'delete' }
+  | {
+      readonly action: 'update';
+      readonly updates: Omit<Record<string, any>, 'serverUpdatedAt'>;
+    } {
+  const { room, leavingUserId, now } = params;
+  const maxPlayers = normalizeMaxPlayers(room.maxPlayers);
+
+  const uniquePlayers = deduplicateRoomPlayers(room.players, room.playerPositions, now);
+  const leavingIndex = uniquePlayers.findIndex((p) => p.uid === leavingUserId);
+  if (leavingIndex < 0) {
+    return { action: 'noop' };
+  }
+
+  const leavingPlayer = uniquePlayers[leavingIndex];
+  const remainingPlayers = uniquePlayers.filter((p) => p.uid !== leavingUserId);
+
+  if (remainingPlayers.length === 0) {
+    return { action: 'delete' };
+  }
+
+  let newHostId = room.hostId;
+  let newHostName = room.hostName;
+
+  if (room.hostId === leavingUserId || !remainingPlayers.some((p) => p.uid === room.hostId)) {
+    newHostId = remainingPlayers[0].uid;
+    newHostName = remainingPlayers[0].displayName;
+    remainingPlayers[0] = sanitizePlayer(remainingPlayers[0], now, { isReady: true });
+  }
+
+  // Phase 1 Snow Rush Leave Isolation: NEVER write `status = 'finished'` or `winnerId`
+  if (room.gameType === 'snow_rush') {
+    const nextStatus: RoomStatus =
+      room.status === 'playing'
+        ? remainingPlayers.length >= 2
+          ? 'playing'
+          : 'waiting'
+        : computeLobbyStatus(remainingPlayers.length, maxPlayers);
+
+    const snowUpdates: Record<string, any> = {
+      players: remainingPlayers,
+      playerCount: remainingPlayers.length,
+      status: nextStatus,
+      playerPositions: buildPlayerPositionsMap(remainingPlayers, now),
+      hostId: newHostId,
+      hostName: newHostName,
+      currentTurnIndex: 0,
+      turnStartTimestamp: 0,
+      turnDeadline: 0,
+      winnerId: null,
+      winnerName: null,
+      matchParticipantIds:
+        nextStatus === 'playing' ? remainingPlayers.map((p) => p.uid) : [],
+      stateVersion: (room.stateVersion || 1) + 1,
+      lastMoveSummary: `${leavingPlayer.displayName} ပြိုင်ပွဲအခန်းမှ ထွက်ခွာသွားပါသည်။`,
+      updatedAt: new Date(now).toISOString(),
+    };
+
+    if (room.disconnectedPlayerId === leavingUserId) {
+      snowUpdates.disconnectedPlayerId = null;
+      snowUpdates.disconnectedPlayerName = null;
+      snowUpdates.reconnectionDeadline = null;
+    }
+
+    return { action: 'update', updates: snowUpdates };
+  }
+
+  // Existing Snakes & Ladders Leave / Forfeit-Win Logic (100% Preserved)
+  let nextTurn = room.currentTurnIndex;
+  let nextTurnStart = room.turnStartTimestamp || now;
+  let nextTurnDeadline = room.turnDeadline || 0;
+  let nextStatus: RoomStatus = room.status;
+  let nextWinnerId = room.winnerId;
+  let nextWinnerName = room.winnerName;
+  let nextMatchParticipants: string[] = Array.isArray(room.matchParticipantIds)
+    ? room.matchParticipantIds
+    : [];
+  let nextSummary = `${leavingPlayer.displayName} အခန်းမှ ထွက်ခွာသွားပါသည်။`;
+
+  if (room.status === 'playing') {
+    if (remainingPlayers.length === 1) {
+      // Sole remaining player wins by opponent exit so their match finishes cleanly
+      const soleWinner = sanitizePlayer(remainingPlayers[0], now, { rank: 1 });
+      remainingPlayers[0] = soleWinner;
+      nextStatus = 'finished';
+      nextWinnerId = soleWinner.uid;
+      nextWinnerName = soleWinner.displayName;
+      nextMatchParticipants = [soleWinner.uid];
+      nextTurn = 0;
+      nextTurnStart = now;
+      nextTurnDeadline = 0;
+      nextSummary = `🏆 ${leavingPlayer.displayName} ဂိမ်းမှ ထွက်ခွာသွားသဖြင့် ${soleWinner.displayName} အနိုင်ရရှိသွားပါသည်!`;
+    } else {
+      // 2+ players remain in active match: preserve exact turn order & positions
+      nextStatus = 'playing';
+      nextMatchParticipants = remainingPlayers.map((p) => p.uid);
+      if (leavingIndex < room.currentTurnIndex) {
+        nextTurn = Math.max(0, room.currentTurnIndex - 1);
+      } else if (leavingIndex === room.currentTurnIndex) {
+        nextTurn = room.currentTurnIndex % remainingPlayers.length;
+        nextTurnStart = now;
+        nextTurnDeadline = now + 30000;
+      } else {
+        nextTurn = Math.min(room.currentTurnIndex, remainingPlayers.length - 1);
+      }
+      if (!nextTurnDeadline || nextTurnDeadline <= now) {
+        nextTurnStart = now;
+        nextTurnDeadline = now + 30000;
+      }
+    }
+  } else if (room.status === 'waiting' || room.status === 'full') {
+    nextStatus = computeLobbyStatus(remainingPlayers.length, maxPlayers);
+    nextTurn = 0;
+    nextTurnStart = 0;
+    nextTurnDeadline = 0;
+    nextMatchParticipants = [];
+  } else {
+    // 'finished' - preserve existing matchParticipantIds so remaining participants can claim rewards
+    nextStatus = 'finished';
+    if (nextMatchParticipants.length === 0) {
+      nextMatchParticipants = uniquePlayers.map((p) => p.uid);
+    }
+    if (nextTurn >= remainingPlayers.length) {
+      nextTurn = 0;
+    }
+  }
+
+  const updates: Record<string, any> = {
+    players: remainingPlayers,
+    playerCount: remainingPlayers.length,
+    status: nextStatus,
+    playerPositions: buildPlayerPositionsMap(remainingPlayers, now),
+    hostId: newHostId,
+    hostName: newHostName,
+    currentTurnIndex: nextTurn,
+    turnStartTimestamp: nextTurnStart,
+    turnDeadline: nextTurnDeadline,
+    winnerId: nextWinnerId,
+    winnerName: nextWinnerName,
+    matchParticipantIds: nextMatchParticipants,
+    stateVersion: (room.stateVersion || 1) + 1,
+    lastMoveSummary: nextSummary,
+    updatedAt: new Date(now).toISOString(),
+  };
+
+  if (room.disconnectedPlayerId === leavingUserId) {
+    updates.disconnectedPlayerId = null;
+    updates.disconnectedPlayerName = null;
+    updates.reconnectionDeadline = null;
+  }
+
+  return { action: 'update', updates };
+}
+
 export async function leaveGameRoom(roomId: string, userId: string) {
   // Immediately mark room session as exited so browser refresh never re-enters this room
   await markGameSessionExited(userId, roomId, false);
@@ -998,116 +1173,23 @@ export async function leaveGameRoom(roomId: string, userId: string) {
       const roomSnap = await transaction.get(roomRef);
       if (!roomSnap.exists()) return;
       const room = roomSnap.data() as GameRoom;
-      const maxPlayers = normalizeMaxPlayers(room.maxPlayers);
 
-      const uniquePlayers = deduplicateRoomPlayers(room.players, room.playerPositions, txNow);
-      const leavingIndex = uniquePlayers.findIndex((p) => p.uid === userId);
-      if (leavingIndex < 0) {
-        return;
-      }
+      const outcome = computeGameRoomLeaveOutcome({
+        room,
+        leavingUserId: userId,
+        now: txNow,
+      });
 
-      const leavingPlayer = uniquePlayers[leavingIndex];
-      const remainingPlayers = uniquePlayers.filter((p) => p.uid !== userId);
-
-      if (remainingPlayers.length === 0) {
+      if (outcome.action === 'noop') return;
+      if (outcome.action === 'delete') {
         transaction.delete(roomRef);
         return;
       }
 
-      let newHostId = room.hostId;
-      let newHostName = room.hostName;
-
-      if (room.hostId === userId || !remainingPlayers.some((p) => p.uid === room.hostId)) {
-        newHostId = remainingPlayers[0].uid;
-        newHostName = remainingPlayers[0].displayName;
-        remainingPlayers[0] = sanitizePlayer(remainingPlayers[0], txNow, { isReady: true });
-      }
-
-      let nextTurn = room.currentTurnIndex;
-      let nextTurnStart = room.turnStartTimestamp || txNow;
-      let nextTurnDeadline = room.turnDeadline || 0;
-      let nextStatus: RoomStatus = room.status;
-      let nextWinnerId = room.winnerId;
-      let nextWinnerName = room.winnerName;
-      let nextMatchParticipants: string[] = Array.isArray(room.matchParticipantIds)
-        ? room.matchParticipantIds
-        : [];
-      let nextSummary = `${leavingPlayer.displayName} အခန်းမှ ထွက်ခွာသွားပါသည်။`;
-
-      if (room.status === 'playing') {
-        if (remainingPlayers.length === 1) {
-          // Sole remaining player wins by opponent exit so their match finishes cleanly
-          const soleWinner = sanitizePlayer(remainingPlayers[0], txNow, { rank: 1 });
-          remainingPlayers[0] = soleWinner;
-          nextStatus = 'finished';
-          nextWinnerId = soleWinner.uid;
-          nextWinnerName = soleWinner.displayName;
-          nextMatchParticipants = [soleWinner.uid];
-          nextTurn = 0;
-          nextTurnStart = txNow;
-          nextTurnDeadline = 0;
-          nextSummary = `🏆 ${leavingPlayer.displayName} ဂိမ်းမှ ထွက်ခွာသွားသဖြင့် ${soleWinner.displayName} အနိုင်ရရှိသွားပါသည်!`;
-        } else {
-          // 2+ players remain in active match: preserve exact turn order & positions
-          nextStatus = 'playing';
-          nextMatchParticipants = remainingPlayers.map((p) => p.uid);
-          if (leavingIndex < room.currentTurnIndex) {
-            nextTurn = Math.max(0, room.currentTurnIndex - 1);
-          } else if (leavingIndex === room.currentTurnIndex) {
-            nextTurn = room.currentTurnIndex % remainingPlayers.length;
-            nextTurnStart = txNow;
-            nextTurnDeadline = txNow + 30000;
-          } else {
-            nextTurn = Math.min(room.currentTurnIndex, remainingPlayers.length - 1);
-          }
-          if (!nextTurnDeadline || nextTurnDeadline <= txNow) {
-            nextTurnStart = txNow;
-            nextTurnDeadline = txNow + 30000;
-          }
-        }
-      } else if (room.status === 'waiting' || room.status === 'full') {
-        nextStatus = computeLobbyStatus(remainingPlayers.length, maxPlayers);
-        nextTurn = 0;
-        nextTurnStart = 0;
-        nextTurnDeadline = 0;
-        nextMatchParticipants = [];
-      } else {
-        // 'finished' - preserve existing matchParticipantIds so remaining participants can claim rewards
-        nextStatus = 'finished';
-        if (nextMatchParticipants.length === 0) {
-          nextMatchParticipants = uniquePlayers.map((p) => p.uid);
-        }
-        if (nextTurn >= remainingPlayers.length) {
-          nextTurn = 0;
-        }
-      }
-
-      const updates: Record<string, any> = {
-        players: remainingPlayers,
-        playerCount: remainingPlayers.length,
-        status: nextStatus,
-        playerPositions: buildPlayerPositionsMap(remainingPlayers, txNow),
-        hostId: newHostId,
-        hostName: newHostName,
-        currentTurnIndex: nextTurn,
-        turnStartTimestamp: nextTurnStart,
-        turnDeadline: nextTurnDeadline,
-        winnerId: nextWinnerId,
-        winnerName: nextWinnerName,
-        matchParticipantIds: nextMatchParticipants,
-        stateVersion: (room.stateVersion || 1) + 1,
-        lastMoveSummary: nextSummary,
-        updatedAt: new Date(txNow).toISOString(),
+      transaction.update(roomRef, {
+        ...outcome.updates,
         serverUpdatedAt: serverTimestamp(),
-      };
-
-      if (room.disconnectedPlayerId === userId) {
-        updates.disconnectedPlayerId = null;
-        updates.disconnectedPlayerName = null;
-        updates.reconnectionDeadline = null;
-      }
-
-      transaction.update(roomRef, updates);
+      });
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `rooms/${roomId}`);

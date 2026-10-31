@@ -166,6 +166,10 @@ export async function claimMatchReward(
         const serverRoom = roomSnap.data() as GameRoom;
         const serverRound = Math.max(1, Math.floor(Number(serverRoom.gameRound) || 1));
 
+        if (serverRoom.gameType !== 'snakes_and_ladders') {
+          throw new Error('ဤဂိမ်းအမျိုးအစားတွင် ပွဲပြီး XP / Points ဆုကြေးစနစ် မပါဝင်သေးပါ။');
+        }
+
         if (serverRoom.status !== 'finished' || !serverRoom.winnerId) {
           throw new Error('ဂိမ်းပွဲ မပြီးဆုံးသေးပါ။');
         }

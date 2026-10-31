@@ -504,8 +504,10 @@ export async function startPrivateSnowRushRace(
     if (room.hostId !== callerUid) return;
     if (room.status !== 'waiting' && room.status !== 'full') return;
 
+    const maxPlayers = normalizeMaxPlayers(room.maxPlayers);
     const uniquePlayers = deduplicateRoomPlayers(room.players, room.playerPositions, txNow);
-    if (uniquePlayers.length < 2 || uniquePlayers.length > 4) return;
+    if (uniquePlayers.length < 2 || uniquePlayers.length > maxPlayers) return;
+    if (!uniquePlayers.every((p) => (p.uid === room.hostId ? true : p.isReady))) return;
 
     const resetStartPlayers = uniquePlayers.map((p) =>
       sanitizePlayer(p, txNow, {
