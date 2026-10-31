@@ -543,7 +543,11 @@ export const RoomView: React.FC<RoomViewProps> = ({
         // Proceed with room exit even if claim already resolved or failed
       }
     }
-    await leaveGameRoom(roomId, currentUser.uid);
+    try {
+      await leaveGameRoom(roomId, currentUser.uid);
+    } catch (err) {
+      console.warn('Post-finish leave room cleanup warning:', err);
+    }
     onExitRoom();
   };
 
@@ -569,7 +573,10 @@ export const RoomView: React.FC<RoomViewProps> = ({
   // 1. WAITING / FULL LOBBY STATE (Delegated to reusable SharedRoomLobby)
   if (room.status === 'waiting' || room.status === 'full') {
     const lobbyMaxPlayers = normalizeMaxPlayers(room.maxPlayers);
-    const lobbyGameTitle = resolvedEntry?.shortTitle || UNKNOWN_GAME_FALLBACK_TITLE;
+    const lobbyGameTitle =
+      resolvedEntry?.id === 'snow_rush'
+        ? resolvedEntry.title
+        : resolvedEntry?.shortTitle || UNKNOWN_GAME_FALLBACK_TITLE;
     const lobbyRuleSummary =
       moduleResolution.kind === 'resolved'
         ? moduleResolution.module.getRuleSummaryMm?.(room) ?? null
@@ -636,10 +643,18 @@ export const RoomView: React.FC<RoomViewProps> = ({
     onLeaveAfterFinish: handleLeaveAfterFinish,
   };
 
+  const isSnowRushActive = room.gameType === 'snow_rush';
+
   return (
-    <div className="max-w-5xl mx-auto w-full space-y-2 sm:space-y-3 text-slate-800">
-      {/* Shared Local Offline Notice if current device lost internet */}
-      {!isOnline && (
+    <div
+      className={
+        isSnowRushActive
+          ? 'max-w-5xl mx-auto w-full flex-1 flex flex-col min-h-[500px] sm:min-h-[580px] text-slate-800'
+          : 'max-w-5xl mx-auto w-full space-y-2 sm:space-y-3 text-slate-800'
+      }
+    >
+      {/* Shared Local Offline Notice if current device lost internet (Turn-Based Games; Snow Rush renders its own in-canvas network banner) */}
+      {!isOnline && !isSnowRushActive && (
         <div className="p-2.5 sm:p-3 bg-amber-50 border border-amber-300 rounded-2xl flex items-center gap-2 text-xs font-bold text-amber-950">
           <WifiOff className="w-4 h-4 text-rose-600 shrink-0" />
           <span>
@@ -648,21 +663,23 @@ export const RoomView: React.FC<RoomViewProps> = ({
         </div>
       )}
 
-      {/* Shared Disconnection Grace Period Notice (60 Seconds) */}
-      {moduleResolution.kind === 'resolved' && room.disconnectedPlayerId && (
-        <div className="p-2.5 sm:p-3 bg-amber-100 border border-amber-400 rounded-2xl flex items-center justify-between gap-2 text-xs font-bold text-amber-950 shadow-xs">
-          <div className="flex items-center gap-2 min-w-0">
-            <WifiOff className="w-4 h-4 text-rose-600 shrink-0" />
-            <span className="truncate sm:whitespace-normal">
-              ကစားသမား <strong className="text-rose-700 font-black">{room.disconnectedPlayerName}</strong> ၏
-              လိုင်းပြတ်တောက်နေပါသည်။ စောင့်ဆိုင်းပေးပါ...
+      {/* Shared Disconnection Grace Period Notice (60 Seconds — Turn-Based Games Only) */}
+      {moduleResolution.kind === 'resolved' &&
+        shouldUseTurnBasedFirestoreRoomLifecycle(room.gameType) &&
+        room.disconnectedPlayerId && (
+          <div className="p-2.5 sm:p-3 bg-amber-100 border border-amber-400 rounded-2xl flex items-center justify-between gap-2 text-xs font-bold text-amber-950 shadow-xs">
+            <div className="flex items-center gap-2 min-w-0">
+              <WifiOff className="w-4 h-4 text-rose-600 shrink-0" />
+              <span className="truncate sm:whitespace-normal">
+                ကစားသမား <strong className="text-rose-700 font-black">{room.disconnectedPlayerName}</strong> ၏
+                လိုင်းပြတ်တောက်နေပါသည်။ စောင့်ဆိုင်းပေးပါ...
+              </span>
+            </div>
+            <span className="px-2.5 py-0.5 bg-rose-600 text-white rounded-lg text-[11px] font-mono tabular-nums font-black shrink-0">
+              {reconnectCountdown}s ကျန်
             </span>
           </div>
-          <span className="px-2.5 py-0.5 bg-rose-600 text-white rounded-lg text-[11px] font-mono tabular-nums font-black shrink-0">
-            {reconnectCountdown}s ကျန်
-          </span>
-        </div>
-      )}
+        )}
 
       {/* Delegated Mini-Game Gameplay Surface or Safe Burmese Fallback UI */}
       <GameModuleRenderer resolution={moduleResolution} gameplayProps={gameplayProps} />

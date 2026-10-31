@@ -122,7 +122,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
 
           <p className="text-slate-900 text-sm md:text-base font-semibold leading-relaxed">
             အခန်းဖန်တီးပြီး Room Code သို့မဟုတ် Link မျှဝေကာ သူငယ်ချင်းများကို ဖိတ်ခေါ်ပါ။
-            မြွေနှင့်လှေကားဂိမ်းကို အတူဆော့ကစားပြီး ရွှေဒင်္ဂါးဆုများနှင့် Level အဆင့်များ ရယူလိုက်ပါ။
+            မြွေနှင့်လှေကားနှင့် နှင်းတောင်ဆင်းပြိုင်ပွဲ (Snow Rush: Avalanche Escape) တို့ကို အွန်လိုင်းမှ အတူတကွ ဆော့ကစားလိုက်ပါ။
           </p>
 
           {/* Quick Action Buttons */}
@@ -305,7 +305,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
                 </p>
 
                 {/* Details */}
-                <div className="flex items-center gap-3 text-xs text-slate-500 mb-6">
+                <div className="flex items-center gap-3 text-xs text-slate-500 mb-3">
                   <span className="flex items-center gap-1 bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-200/80">
                     <Users className="w-3.5 h-3.5 text-amber-600" />
                     <span>{game.minPlayers} - {game.maxPlayers} ဦး</span>
@@ -314,6 +314,18 @@ export const HomeView: React.FC<HomeViewProps> = ({
                     {game.difficulty === 'easy' ? 'အလွယ်' : game.difficulty === 'medium' ? 'အသင့်အတင့်' : 'ခက်'}
                   </span>
                 </div>
+
+                {game.id === 'snow_rush' ? (
+                  <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-semibold text-sky-800 mb-5">
+                    <span className="font-mono tabular-nums">1.50 KM</span>
+                    <span aria-hidden="true">·</span>
+                    <span>Real-time Multiplayer</span>
+                    <span aria-hidden="true">·</span>
+                    <span className="text-slate-500">XP / Points ဆုကြေး မပါဝင်သေးပါ</span>
+                  </div>
+                ) : (
+                  <div className="mb-3" />
+                )}
               </div>
 
               {/* Action Button */}

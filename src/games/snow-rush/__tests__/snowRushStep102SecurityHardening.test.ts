@@ -1802,18 +1802,18 @@ async function runStep102SecuritySuite(): Promise<void> {
       'G3.6e: Worker /ws/snow-rush/:roomId must forward valid child-vibes3050.pages.dev Origin to Durable Object'
     );
 
-    // Public Launch Gate Preservation (`Sections I & J`)
+    // Step 10.5 Public Activation & Private Route Removal Verification
     assert(
-      getGameById('snow_rush')?.status === 'coming_soon' &&
-        !getAvailableGames().some((g) => g.id === 'snow_rush') &&
-        !isGameModulePlayable('snow_rush') &&
-        resolveGameModule('snow_rush').kind === 'unresolved',
-      'G3.7a: snow_rush must remain coming_soon in registry.ts during Step 10.2'
+      getGameById('snow_rush')?.status === 'available' &&
+        getAvailableGames().some((g) => g.id === 'snow_rush') &&
+        isGameModulePlayable('snow_rush') &&
+        resolveGameModule('snow_rush').kind === 'resolved',
+      'G3.7a: snow_rush is activated as available in registry.ts for Step 10.5 Public Lobby'
     );
     const appRaw = fs.readFileSync(path.join(WORKSPACE_ROOT, 'src/App.tsx'), 'utf8');
     assert(
-      appRaw.includes("get('privateSnowRush') === '1'"),
-      'G3.7b: ?privateSnowRush=1 Private Test entry must remain intact until Step 10.4'
+      !appRaw.includes('SnowRushPrivateTestView') && !appRaw.includes('showPrivateSnowRush'),
+      'G3.7b: ?privateSnowRush=1 Private Test route is disabled in src/App.tsx for Step 10.5 production launch'
     );
 
     passedGroups += 1;

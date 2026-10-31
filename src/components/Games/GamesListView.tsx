@@ -64,8 +64,9 @@ export const GamesListView: React.FC<GamesListViewProps> = ({ onEnterRoom }) => 
             Child Vibes မီနီဂိမ်း စုစည်းမှု
           </h1>
           <p className="text-xs md:text-sm text-slate-600 mt-1 max-w-xl">
-            အမျိုးအစားအလိုက် မီနီဂိမ်းများကို ရွေးချယ်ကစားနိုင်ပါသည်။ လက်ရှိတွင် မြွေနှင့်လှေကားဂိမ်းကို အပြည့်အဝ
-            ကစားနိုင်ပြီး အခြားဂိမ်းများကို မကြာမီ ဆက်တိုက်ထည့်သွင်းပေးသွားမည် ဖြစ်ပါသည်။
+            အမျိုးအစားအလိုက် မီနီဂိမ်းများကို ရွေးချယ်ကစားနိုင်ပါသည်။ လက်ရှိတွင် မြွေနှင့်လှေကားနှင့်
+            နှင်းတောင်ဆင်းပြိုင်ပွဲ (Snow Rush: Avalanche Escape) တို့ကို ကစားနိုင်ပြီး အခြားဂိမ်းများကို
+            ဆက်တိုက်ထည့်သွင်းပေးသွားမည် ဖြစ်ပါသည်။
           </p>
         </div>
 
@@ -135,7 +136,7 @@ export const GamesListView: React.FC<GamesListViewProps> = ({ onEnterRoom }) => 
                 {game.description}
               </p>
 
-              <div className="flex items-center gap-3 text-xs text-slate-500 mb-6">
+              <div className="flex items-center gap-3 text-xs text-slate-500 mb-3">
                 <span className="flex items-center gap-1 bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-200">
                   <Users className="w-3.5 h-3.5 text-amber-600" />
                   <span>{game.minPlayers} - {game.maxPlayers} ဦး</span>
@@ -144,6 +145,18 @@ export const GamesListView: React.FC<GamesListViewProps> = ({ onEnterRoom }) => 
                   {game.difficulty === 'easy' ? 'အလွယ်' : game.difficulty === 'medium' ? 'အသင့်အတင့်' : 'ခက်'}
                 </span>
               </div>
+
+              {game.id === 'snow_rush' ? (
+                <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-semibold text-sky-800 mb-5">
+                  <span className="font-mono tabular-nums">1.50 KM</span>
+                  <span aria-hidden="true">·</span>
+                  <span>Real-time Multiplayer</span>
+                  <span aria-hidden="true">·</span>
+                  <span className="text-slate-500">XP / Points ဆုကြေး မပါဝင်သေးပါ</span>
+                </div>
+              ) : (
+                <div className="mb-3" />
+              )}
             </div>
 
             {game.status === 'available' ? (

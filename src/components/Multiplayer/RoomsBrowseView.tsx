@@ -424,12 +424,30 @@ export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom })
                   <div className="text-[11px] text-slate-600 mb-4 bg-slate-50 p-2.5 rounded-xl border border-slate-200 space-y-0.5">
                     <div className="font-semibold text-slate-800 flex items-center gap-1.5">
                       <span>{roomGameIcon}</span>
-                      <span className="truncate">ဂိမ်း: {roomGameTitle}</span>
+                      <span className="truncate">
+                        ဂိမ်း:{' '}
+                        {effectiveGameType === 'snow_rush' && roomGameEntry
+                          ? roomGameEntry.title
+                          : roomGameTitle}
+                      </span>
                     </div>
                     {effectiveGameType === 'snakes_and_ladders' ? (
                       <div>
                         စည်းမျဉ်း: {room.exactFinish ? 'အတိအကျဝင်ရန်လို' : 'သာမန်စည်းမျဉ်း'}
                       </div>
+                    ) : effectiveGameType === 'snow_rush' ? (
+                      <>
+                        <div className="flex flex-wrap items-center gap-1 text-sky-800 font-semibold">
+                          <span className="font-mono tabular-nums">1.50 KM</span>
+                          <span aria-hidden="true">·</span>
+                          <span>Real-time Multiplayer</span>
+                          <span aria-hidden="true">·</span>
+                          <span className="tabular-nums">2 - {maxCap} ဦး</span>
+                        </div>
+                        <div className="text-slate-500">
+                          Phase 1: XP / Points ဆုကြေး မပါဝင်သေးပါ
+                        </div>
+                      </>
                     ) : (
                       <div>
                         ကစားသမား: {roomGameEntry ? `${roomGameEntry.minPlayers} - ${roomGameEntry.maxPlayers} ဦး` : `${maxCap} ဦး`}

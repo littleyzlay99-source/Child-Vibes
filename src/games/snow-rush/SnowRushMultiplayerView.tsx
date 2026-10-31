@@ -98,6 +98,7 @@ export const SnowRushMultiplayerView: React.FC<SnowRushMultiplayerViewProps> = (
   isOnline,
   isExiting,
   onRequestExit,
+  onLeaveAfterFinish,
   workerBaseUrlOverride,
   createWebSocketOverride,
   getIdTokenOverride,
@@ -121,6 +122,7 @@ export const SnowRushMultiplayerView: React.FC<SnowRushMultiplayerViewProps> = (
   const [authenticatedUid, setAuthenticatedUid] = useState<string | null>(currentUserId);
   const [authoritativeFinish, setAuthoritativeFinish] =
     useState<AuthoritativeFinishRecord | null>(null);
+  const [isLeavingPostRace, setIsLeavingPostRace] = useState<boolean>(false);
 
   const socketClientRef = useRef<SnowRushSocketClient | null>(null);
   const interpolatorRef = useRef<SnowRushSnapshotInterpolator>(
@@ -556,6 +558,20 @@ export const SnowRushMultiplayerView: React.FC<SnowRushMultiplayerViewProps> = (
     socketClientRef.current?.connect();
   }, [roomGuardError, resolvedWsUrl]);
 
+  const handlePodiumExitRoom = useCallback(async () => {
+    if (isExiting || isLeavingPostRace) return;
+    if (onLeaveAfterFinish) {
+      setIsLeavingPostRace(true);
+      try {
+        await onLeaveAfterFinish();
+      } finally {
+        setIsLeavingPostRace(false);
+      }
+      return;
+    }
+    onRequestExit();
+  }, [isExiting, isLeavingPostRace, onLeaveAfterFinish, onRequestExit]);
+
   // --------------------------------------------------------------------------
   // State A: `VITE_SNOW_RUSH_WS_URL` Unconfigured (Zero Socket, Zero Loop)
   // --------------------------------------------------------------------------
@@ -663,7 +679,7 @@ export const SnowRushMultiplayerView: React.FC<SnowRushMultiplayerViewProps> = (
     hud.playerStatus === 'tumble';
 
   return (
-    <div className="relative flex-1 w-full h-full min-h-[460px] flex flex-col overflow-hidden bg-sky-100 text-slate-900">
+    <div className="relative flex-1 w-full h-full min-h-[500px] sm:min-h-[580px] flex flex-col rounded-2xl sm:rounded-3xl border border-slate-200/80 shadow-xs overflow-hidden bg-sky-100 text-slate-900">
       <RaceProgressBar
         hud={hud}
         soundEnabled={soundEnabled}
@@ -674,7 +690,7 @@ export const SnowRushMultiplayerView: React.FC<SnowRushMultiplayerViewProps> = (
         onRequestExit={onRequestExit}
       />
 
-      <div className="relative flex-1 w-full overflow-hidden">
+      <div className="relative flex-1 w-full min-h-[380px] flex flex-col overflow-hidden">
         <SnowRushCanvas
           mode="multiplayer"
           interpolatorRef={interpolatorRef}
@@ -730,7 +746,7 @@ export const SnowRushMultiplayerView: React.FC<SnowRushMultiplayerViewProps> = (
           </div>
         )}
 
-        {/* Display-Only Authoritative Match Finished Podium */}
+        {/* Authoritative Match Finished Podium (Phase 1 Casual Mode — No XP / Points Rewards) */}
         {authoritativeFinish !== null && (
           <SnowRushMultiplayerPodium
             finishState={authoritativeFinish.finishState}
@@ -738,8 +754,10 @@ export const SnowRushMultiplayerView: React.FC<SnowRushMultiplayerViewProps> = (
             currentUserId={effectiveLocalUid}
             connectionStatus={connectionStatus}
             rttMs={rttMs}
-            isExiting={isExiting}
-            onExitRoom={onRequestExit}
+            isExiting={isExiting || isLeavingPostRace}
+            onExitRoom={() => {
+              void handlePodiumExitRoom();
+            }}
           />
         )}
 

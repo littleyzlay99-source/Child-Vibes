@@ -141,11 +141,11 @@ const GAME_REGISTRY_ENTRIES: readonly GameRegistryEntry[] = [
     title: 'နှင်းတောင်ဆင်းပြိုင်ပွဲ (Snow Rush: Avalanche Escape)',
     shortTitle: 'နှင်းတောင်ဆင်းပြိုင်ပွဲ',
     description:
-      'နှင်းတောင်စောင်းတစ်လျှောက် ၁ ကီလိုမီတာ အမြန်ဆင်းပြိုင်ရမည့် ရင်ခုန်စရာ နှင်းလျှောစီး အပြေးပြိုင်ပွဲ မကြာမီလာမည်။',
+      'နှင်းတောင်စောင်းတစ်လျှောက် 1.50 KM အကွာအဝေးကို သူငယ်ချင်း ၂–၄ ဦး Real-time Multiplayer အပြေးပြိုင်ရမည့် နှင်းလျှောစီးပြိုင်ပွဲ။ Phase 1 တွင် XP / Points ဆုကြေး မပါဝင်သေးပါ။',
     category: 'racing',
     minPlayers: 2,
     maxPlayers: 4,
-    status: 'coming_soon',
+    status: 'available',
     icon: '🏂',
     difficulty: 'easy',
     sortOrder: 8,

@@ -466,29 +466,37 @@ async function runStep49ReadinessSuite(): Promise<void> {
     passed += 1;
   }
 
-  // 6. Public `coming_soon` Guard, Zero Public Room Creation, & Secret Hygiene Scan
+  // 6. Step 10.5 Public Activation, Unreleased `coming_soon` Guard, & Secret Hygiene Scan
   {
     const snowEntry = getGameById('snow_rush');
-    assert(snowEntry?.status === 'coming_soon', 'snow_rush must stay coming_soon in registry.ts');
+    assert(snowEntry?.status === 'available', 'snow_rush must be available in registry.ts (Step 10.5)');
     assert(
-      !getAvailableGames().some((g) => g.id === 'snow_rush'),
-      'snow_rush must not appear in getAvailableGames()'
+      getAvailableGames().some((g) => g.id === 'snow_rush'),
+      'snow_rush must appear in getAvailableGames() (Step 10.5)'
     );
     assert(
-      resolveGameModule('snow_rush').kind === 'unresolved' &&
-        !isGameModulePlayable('snow_rush'),
-      'Public moduleResolver must keep snow_rush unresolved (coming_soon)'
+      resolveGameModule('snow_rush').kind === 'resolved' &&
+        isGameModulePlayable('snow_rush'),
+      'Public moduleResolver must resolve snow_rush cleanly (Step 10.5)'
     );
 
-    let publicCreateBlocked = false;
+    const snowResolved = resolveCreateGameRoomInput('snow_rush', { maxPlayers: 4 });
+    assert(
+      snowResolved.gameType === 'snow_rush' &&
+        snowResolved.maxPlayers === 4 &&
+        snowResolved.exactFinish === false,
+      'Public createGameRoom(snow_rush) resolves cleanly via shared roomService'
+    );
+
+    let unreleasedCreateBlocked = false;
     try {
-      resolveCreateGameRoomInput('snow_rush', { maxPlayers: 4 });
+      resolveCreateGameRoomInput('kart_racing', { maxPlayers: 4 });
     } catch {
-      publicCreateBlocked = true;
+      unreleasedCreateBlocked = true;
     }
     assert(
-      publicCreateBlocked,
-      'Public createGameRoom(snow_rush) must remain blocked by GAME_UNAVAILABLE'
+      unreleasedCreateBlocked,
+      'Unreleased coming_soon games (kart_racing) must remain blocked by GAME_UNAVAILABLE'
     );
 
     const snakesResolved = resolveCreateGameRoomInput('snakes_and_ladders', {

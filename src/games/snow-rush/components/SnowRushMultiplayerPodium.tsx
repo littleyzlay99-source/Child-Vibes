@@ -154,10 +154,10 @@ export const SnowRushMultiplayerPodium: React.FC<SnowRushMultiplayerPodiumProps>
           })}
         </div>
 
-        {/* Display-Only Settlement Guard Notice */}
+        {/* Phase 1 Public Casual Gameplay Notice (No XP / Points Rewards) */}
         <div className="p-3 rounded-2xl bg-slate-100 border border-slate-200 text-[11px] text-slate-700 leading-relaxed">
-          ဤအဆင့်သည် <strong>Display-Only Multiplayer စမ်းသပ်မှု</strong> ဖြစ်ပါသည် — XP၊ ရမှတ် (Points)
-          နှင့် Firestore အခန်းရလဒ် မှတ်တမ်းတင်ခြင်း မပြုလုပ်သေးပါ။
+          <strong>Snow Rush: Avalanche Escape (1.50 KM · Real-time Multiplayer)</strong> — Phase 1 တွင်
+          XP / Points ဆုကြေး မပါဝင်သေးပါ (No XP / Points Rewards in Phase 1)။
         </div>
 
         {/* Exit Room Action */}

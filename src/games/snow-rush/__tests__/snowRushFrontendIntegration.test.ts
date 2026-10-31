@@ -314,16 +314,20 @@ async function runTests(): Promise<void> {
   }
 
   // ---------------------------------------------------------------------------
-  // Test 3: `snow_rush` registered in `REGISTERED_GAME_MODULES` while staying `coming_soon`
+  // Test 3: `snow_rush` activated as `available` in `registry.ts` & resolved in `moduleResolver` (Step 10.5)
   // ---------------------------------------------------------------------------
   {
     const snowEntry = getGameById('snow_rush');
     assert.ok(snowEntry);
-    assert.equal(snowEntry.status, 'coming_soon', 'snow_rush MUST remain coming_soon in registry.ts');
+    assert.equal(snowEntry.status, 'available', 'snow_rush MUST be available in registry.ts (Step 10.5)');
 
     const availableIds = getAvailableGames().map((g) => g.id);
-    assert.deepEqual(availableIds, ['snakes_and_ladders'], 'Only snakes_and_ladders is available in production');
-    assert.ok(!availableIds.includes('snow_rush'), 'snow_rush must NOT appear in getAvailableGames()');
+    assert.deepEqual(
+      availableIds,
+      ['snakes_and_ladders', 'snow_rush'],
+      'Both snakes_and_ladders and snow_rush are available in production'
+    );
+    assert.ok(availableIds.includes('snow_rush'), 'snow_rush appears in getAvailableGames()');
 
     const registeredModuleIds = getRegisteredGameModuleIds();
     assert.ok(
@@ -333,13 +337,13 @@ async function runTests(): Promise<void> {
     assert.equal(snowRushModule.id, 'snow_rush');
 
     const snowResolution = resolveGameModule('snow_rush');
-    assert.equal(snowResolution.kind, 'unresolved');
-    if (snowResolution.kind === 'unresolved') {
-      assert.equal(snowResolution.reason, 'coming_soon');
+    assert.equal(snowResolution.kind, 'resolved');
+    if (snowResolution.kind === 'resolved') {
+      assert.equal(snowResolution.module, snowRushModule);
     }
-    assert.equal(isGameModulePlayable('snow_rush'), false);
+    assert.equal(isGameModulePlayable('snow_rush'), true);
     passed += 1;
-    console.log('PASS [3/13] snow_rush stays coming_soon & disabled in production while wired in moduleResolver');
+    console.log('PASS [3/14] snow_rush activated as available & resolved in moduleResolver (Step 10.5)');
   }
 
   // ---------------------------------------------------------------------------
@@ -786,7 +790,12 @@ async function runTests(): Promise<void> {
       podiumHtml.includes(formatMultiplayerFinishReasonMm('post_winner_timeout')),
       'Burmese finish reason rendered'
     );
-    assert.ok(podiumHtml.includes('Display-Only Multiplayer'), 'Display-Only notice rendered');
+    assert.ok(
+      podiumHtml.includes('No XP / Points Rewards in Phase 1') &&
+        podiumHtml.includes('XP / Points ဆုကြေး မပါဝင်သေးပါ') &&
+        !podiumHtml.includes('Display-Only Multiplayer'),
+      'Public Phase 1 no-reward notice rendered without private test text'
+    );
     assert.ok(podiumHtml.includes('အခန်းမှ ထွက်မည်'), 'Exit Room button rendered');
     passed += 1;
     console.log('PASS [10/14] Authoritative race_finished Podium UI renders Winner, 1.50 km & Exit');

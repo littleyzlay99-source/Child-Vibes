@@ -391,10 +391,6 @@ if (import.meta.env.DEV) {
   LazySnowRushDevPreview = React.lazy(() => import('./games/snow-rush/SnowRushDevPreview'));
 }
 
-const LazySnowRushPrivateTestView = React.lazy(
-  () => import('./games/snow-rush/SnowRushPrivateTestView')
-);
-
 export default function App() {
   const [showDevSnowRush, setShowDevSnowRush] = useState<boolean>(() => {
     if (import.meta.env.DEV && typeof window !== 'undefined') {
@@ -403,12 +399,20 @@ export default function App() {
     return false;
   });
 
-  const [showPrivateSnowRush, setShowPrivateSnowRush] = useState<boolean>(() => {
-    if (typeof window !== 'undefined') {
-      return new URLSearchParams(window.location.search).get('privateSnowRush') === '1';
+  // Step 10.5: ?privateSnowRush=1 Private Test entry is disabled in production/public builds.
+  // Strip any stale ?privateSnowRush query param so old links land cleanly on the Public Lobby.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('privateSnowRush')) {
+      params.delete('privateSnowRush');
+      const nextQuery = params.toString();
+      const nextUrl = nextQuery
+        ? `${window.location.pathname}?${nextQuery}`
+        : window.location.pathname;
+      window.history.replaceState({}, document.title, nextUrl);
     }
-    return false;
-  });
+  }, []);
 
   if (import.meta.env.DEV && showDevSnowRush && LazySnowRushDevPreview) {
     const DevPreviewComponent = LazySnowRushDevPreview;
@@ -435,36 +439,6 @@ export default function App() {
           }}
         />
       </React.Suspense>
-    );
-  }
-
-  if (showPrivateSnowRush) {
-    return (
-      <AuthProvider>
-        <React.Suspense
-          fallback={
-            <div className="min-h-[100dvh] bg-slate-950 text-slate-100 flex items-center justify-center text-sm font-bold">
-              Snow Rush Private Multiplayer Test ဖွင့်လှစ်နေပါသည်...
-            </div>
-          }
-        >
-          <LazySnowRushPrivateTestView
-            onExitPrivateTest={() => {
-              if (typeof window !== 'undefined') {
-                const params = new URLSearchParams(window.location.search);
-                params.delete('privateSnowRush');
-                params.delete('room');
-                const nextQuery = params.toString();
-                const nextUrl = nextQuery
-                  ? `${window.location.pathname}?${nextQuery}`
-                  : window.location.pathname;
-                window.history.replaceState({}, document.title, nextUrl);
-              }
-              setShowPrivateSnowRush(false);
-            }}
-          />
-        </React.Suspense>
-      </AuthProvider>
     );
   }
 

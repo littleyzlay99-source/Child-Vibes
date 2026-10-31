@@ -285,13 +285,25 @@ export const CreateRoomModal: React.FC<CreateRoomModalProps> = ({
                       </span>
                       <div className="min-w-0">
                         <div className="font-bold text-slate-900 text-sm truncate">
-                          {game.shortTitle}
+                          {game.title}
                         </div>
-                        <div className="text-[11px] text-slate-600 flex items-center gap-2 mt-0.5">
+                        <div className="text-[11px] text-slate-600 flex flex-wrap items-center gap-1.5 mt-0.5">
                           <span className="inline-flex items-center gap-1 tabular-nums">
                             <Users className="w-3 h-3 text-amber-600" />
                             {game.minPlayers} - {game.maxPlayers} ဦး
                           </span>
+                          {game.id === 'snow_rush' && (
+                            <>
+                              <span aria-hidden="true">·</span>
+                              <span className="font-mono tabular-nums text-sky-800 font-semibold">
+                                1.50 KM
+                              </span>
+                              <span aria-hidden="true">·</span>
+                              <span className="text-sky-800 font-semibold">
+                                Real-time Multiplayer
+                              </span>
+                            </>
+                          )}
                           <span aria-hidden="true">·</span>
                           <span className="text-emerald-700 font-semibold">ကစားနိုင်သည်</span>
                         </div>
@@ -365,6 +377,21 @@ export const CreateRoomModal: React.FC<CreateRoomModalProps> = ({
                   className="w-5 h-5 accent-amber-500 rounded cursor-pointer shrink-0"
                 />
               </label>
+            )}
+
+            {selectedGame.id === 'snow_rush' && (
+              <div className="p-3.5 bg-sky-50/70 rounded-2xl border border-sky-200/80 space-y-1 text-xs text-slate-700">
+                <div className="font-bold text-slate-900 flex flex-wrap items-center gap-1.5">
+                  <span>Snow Rush: Avalanche Escape</span>
+                  <span aria-hidden="true">·</span>
+                  <span className="font-mono tabular-nums text-sky-800">1.50 KM</span>
+                  <span aria-hidden="true">·</span>
+                  <span>Real-time Multiplayer</span>
+                </div>
+                <div className="text-[11px] text-slate-600 leading-relaxed">
+                  ကစားသမား 2–4 ဦး တစ်ပြိုင်နက် တောင်ဆင်းပြိုင်ရမည် — Phase 1 တွင် XP / Points ဆုကြေး မပါဝင်သေးပါ။
+                </div>
+              </div>
             )}
           </div>
 
