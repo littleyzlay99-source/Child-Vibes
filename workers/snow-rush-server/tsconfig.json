@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "WebWorker"],
+    "types": [],
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": [
+    "src/**/*.ts",
+    "../../src/games/snow-rush/types.ts",
+    "../../src/games/snow-rush/constants.ts",
+    "../../src/games/snow-rush/track.ts",
+    "../../src/games/snow-rush/items.ts",
+    "../../src/games/snow-rush/simulation.ts",
+    "../../src/games/snow-rush/engine/multiplayerTypes.ts",
+    "../../src/games/snow-rush/engine/multiplayerSimulation.ts",
+    "../../src/games/snow-rush/engine/index.ts",
+    "../../src/games/snow-rush/network/protocol.ts"
+  ],
+  "exclude": ["src/__tests__/**"]
+}

@@ -1,12 +1,18 @@
 import React, { useState, useRef } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import {
-  createGameRoom,
   joinGameRoomByCode,
   RoomJoinError,
   RoomJoinErrorCode,
 } from '../../services/roomService';
-import { GameRoom, MiniGameCard } from '../../types';
+import {
+  DEFAULT_GAME_ID,
+  GameCategory,
+  RegisteredGameId,
+  getAllGames,
+} from '../../games/registry';
+import { GameRoom } from '../../types';
+import { CreateRoomModal } from '../Multiplayer/CreateRoomModal';
 import { sounds } from '../../lib/sound';
 import {
   Gamepad2,
@@ -40,16 +46,15 @@ export const HomeView: React.FC<HomeViewProps> = ({
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [joinCodeInput, setJoinCodeInput] = useState<string>('');
   const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
+  const [createModalGameId, setCreateModalGameId] = useState<RegisteredGameId>(DEFAULT_GAME_ID);
   const [showJoinModal, setShowJoinModal] = useState<boolean>(false);
-  const [maxPlayers, setMaxPlayers] = useState<number>(4);
-  const [exactFinishRule, setExactFinishRule] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [errorCode, setErrorCode] = useState<RoomJoinErrorCode | null>(null);
   const [dailyMsg, setDailyMsg] = useState<string | null>(null);
   const submitLockRef = useRef<boolean>(false);
 
-  const categories = [
+  const categories: { id: 'all' | GameCategory; label: string }[] = [
     { id: 'all', label: 'အားလုံး' },
     { id: 'board', label: 'ဘုတ်ဂိမ်းများ (Board)' },
     { id: 'puzzle', label: 'ပဟေဠိ (Puzzle)' },
@@ -59,100 +64,17 @@ export const HomeView: React.FC<HomeViewProps> = ({
     { id: 'casual', label: 'ပေါ့ပေါ့ပါးပါး (Casual)' },
   ];
 
-  const miniGames: MiniGameCard[] = [
-    {
-      id: 'snakes_and_ladders',
-      title: 'မြွေနှင့်လှေကား (Snakes & Ladders)',
-      category: 'board',
-      description:
-        'ငယ်ဘဝအမှတ်တရ မြွေနှင့်လှေကားဂိမ်းကို သူငယ်ချင်းများနှင့်အတူ အွန်လိုင်းမှ အံစာတုံးခေါက်ပြီး ယှဉ်ပြိုင်ကစားပါ။',
-      icon: '🐍',
-      minPlayers: 2,
-      maxPlayers: 4,
-      badge: 'available',
-      difficulty: 'easy',
-    },
-    {
-      id: 'ludo_king',
-      title: 'ရွှေလုဒို (Shwe Ludo)',
-      category: 'board',
-      description: 'ကစားသမား ၄ ဦး ယှဉ်ပြိုင်နိုင်မည့် ရိုးရာ လုဒိုဘုတ်ဂိမ်း မကြာမီလာမည်။',
-      icon: '🎲',
-      minPlayers: 2,
-      maxPlayers: 4,
-      badge: 'coming_soon',
-      difficulty: 'medium',
-    },
-    {
-      id: 'burmese_chess',
-      title: 'မြန်မာ့စစ်တုရင် (Myanmar Chess)',
-      category: 'brain',
-      description: 'ရှေးရိုးစဉ်လာ ဗျူဟာမြောက် မြန်မာ့စစ်တုရင် ယှဉ်ပြိုင်ပွဲ။',
-      icon: '♟️',
-      minPlayers: 2,
-      maxPlayers: 2,
-      badge: 'coming_soon',
-      difficulty: 'hard',
-    },
-    {
-      id: 'word_puzzle',
-      title: 'မြန်မာစကားထာ ပဟေဠိ (Word Puzzle)',
-      category: 'puzzle',
-      description: 'စကားလုံးဆက် ဉာဏ်စမ်း ပဟေဠိများနှင့် အမှတ်ရှာဖွေမှု။',
-      icon: '🧩',
-      minPlayers: 1,
-      maxPlayers: 4,
-      badge: 'coming_soon',
-      difficulty: 'medium',
-    },
-    {
-      id: 'space_arcade',
-      title: 'အာကာသစစ်သည် (Space Arcade)',
-      category: 'arcade',
-      description: 'လျင်မြန်သော တုံ့ပြန်မှုနှင့် ဂိုးသွင်းရယူမည့် မီနီ အာကိတ်ဂိမ်း။',
-      icon: '🚀',
-      minPlayers: 1,
-      maxPlayers: 2,
-      badge: 'coming_soon',
-      difficulty: 'medium',
-    },
-    {
-      id: 'kart_racing',
-      title: 'မီနီ ကားပြိုင်ပွဲ (Mini Kart Racer)',
-      category: 'racing',
-      description: 'သူငယ်ချင်းများနှင့် အပြေးပြိုင်မည့် ရွှင်လန်းဖွယ် ကားပြိုင်ပွဲ။',
-      icon: '🏎️',
-      minPlayers: 2,
-      maxPlayers: 4,
-      badge: 'coming_soon',
-      difficulty: 'easy',
-    },
-  ];
+  const miniGames = getAllGames();
 
   const filteredGames =
     selectedCategory === 'all'
       ? miniGames
       : miniGames.filter((g) => g.category === selectedCategory);
 
-  const handleCreateRoom = async () => {
-    if (!userProfile || submitLockRef.current || isSubmitting) return;
-    submitLockRef.current = true;
-    setIsSubmitting(true);
-    setErrorMsg(null);
-    setErrorCode(null);
+  const openCreateRoomForGame = (gameId: RegisteredGameId = DEFAULT_GAME_ID) => {
     sounds.playClick();
-    try {
-      const result = await createGameRoom(userProfile, maxPlayers, exactFinishRule);
-      setShowCreateModal(false);
-      setIsSubmitting(false);
-      submitLockRef.current = false;
-      onEnterRoom(result.roomId, result.room);
-    } catch (err: any) {
-      setErrorCode(err instanceof RoomJoinError ? err.code : 'UNKNOWN_ERROR');
-      setErrorMsg(err?.message || 'အခန်းဖန်တီးခြင်း မအောင်မြင်ပါ');
-      setIsSubmitting(false);
-      submitLockRef.current = false;
-    }
+    setCreateModalGameId(gameId);
+    setShowCreateModal(true);
   };
 
   const handleJoinRoom = async (e: React.FormEvent) => {
@@ -206,12 +128,8 @@ export const HomeView: React.FC<HomeViewProps> = ({
           {/* Quick Action Buttons */}
           <div className="flex flex-wrap items-center gap-3 pt-2">
             <button
-              onClick={() => {
-                sounds.playClick();
-                setErrorMsg(null);
-                setErrorCode(null);
-                setShowCreateModal(true);
-              }}
+              type="button"
+              onClick={() => openCreateRoomForGame(DEFAULT_GAME_ID)}
               className="px-6 py-3.5 rounded-2xl bg-slate-950 hover:bg-slate-900 text-amber-400 font-black text-sm md:text-base flex items-center gap-2 shadow-xl hover:scale-105 active:scale-95 transition cursor-pointer"
             >
               <PlusCircle className="w-5 h-5" />
@@ -355,7 +273,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
             <div
               key={game.id}
               className={`bg-white border rounded-3xl p-6 flex flex-col justify-between transition-all duration-300 shadow-xs relative overflow-hidden group ${
-                game.badge === 'available'
+                game.status === 'available'
                   ? 'border-slate-200/90 hover:border-amber-400 hover:shadow-md'
                   : 'border-slate-200/70 opacity-80'
               }`}
@@ -367,7 +285,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
                     {game.icon}
                   </div>
 
-                  {game.badge === 'available' ? (
+                  {game.status === 'available' ? (
                     <span className="px-3 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-bold flex items-center gap-1">
                       <CheckCircle2 className="w-3 h-3 text-emerald-600" />
                       <span>ကစားနိုင်သည်</span>
@@ -399,12 +317,10 @@ export const HomeView: React.FC<HomeViewProps> = ({
               </div>
 
               {/* Action Button */}
-              {game.badge === 'available' ? (
+              {game.status === 'available' ? (
                 <button
-                  onClick={() => {
-                    sounds.playClick();
-                    setShowCreateModal(true);
-                  }}
+                  type="button"
+                  onClick={() => openCreateRoomForGame(game.id)}
                   className="w-full py-3.5 rounded-2xl bg-amber-400 hover:bg-amber-500 text-slate-950 font-black text-sm flex items-center justify-center gap-2 shadow-xs hover:scale-[1.01] active:scale-95 transition cursor-pointer"
                 >
                   <Play className="w-4 h-4 fill-current" />
@@ -412,6 +328,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
                 </button>
               ) : (
                 <button
+                  type="button"
                   disabled
                   className="w-full py-3.5 rounded-2xl bg-slate-100 text-slate-400 font-bold text-xs flex items-center justify-center gap-1.5 cursor-not-allowed border border-slate-200"
                 >
@@ -424,97 +341,13 @@ export const HomeView: React.FC<HomeViewProps> = ({
         </div>
       </div>
 
-      {/* CREATE ROOM MODAL */}
-      {showCreateModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-xs animate-in fade-in">
-          <div className="bg-white border border-slate-200 rounded-3xl p-6 md:p-8 max-w-md w-full shadow-2xl relative text-slate-800">
-            <h3 className="text-xl font-black text-slate-900 mb-2">အခန်းအသစ် ဖန်တီးမည်</h3>
-            <p className="text-xs text-slate-500 mb-6">
-              အခန်းဖွင့်ပြီးပါက Room Code ဖြင့် သူငယ်ချင်းများကို ဖိတ်ခေါ်နိုင်ပါသည်
-            </p>
-
-            {errorMsg && (
-              <div
-                className={`mb-4 p-3 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
-                  errorCode === 'NETWORK_ERROR'
-                    ? 'bg-amber-50 border-amber-300 text-amber-900'
-                    : 'bg-rose-50 border-rose-300 text-rose-800'
-                }`}
-              >
-                {errorCode === 'NETWORK_ERROR' && <WifiOff className="w-4 h-4 shrink-0" />}
-                <span>{errorMsg}</span>
-              </div>
-            )}
-
-            <div className="space-y-4">
-              {/* Game Info */}
-              <div className="bg-amber-50/70 p-3.5 rounded-2xl border border-amber-200/80 flex items-center gap-3">
-                <span className="text-2xl">🐍</span>
-                <div>
-                  <div className="font-bold text-slate-900 text-sm">မြွေနှင့်လှေကားဂိမ်း</div>
-                  <div className="text-[11px] text-slate-600">10x10 Grid (၁ မှ ၁၀၀ အကွက်)</div>
-                </div>
-              </div>
-
-              {/* Max Players Choice */}
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-2">
-                  ကစားသမား အရေအတွက် ရွေးချယ်ပါ
-                </label>
-                <div className="grid grid-cols-3 gap-2">
-                  {[2, 3, 4].map((count) => (
-                    <button
-                      key={count}
-                      type="button"
-                      onClick={() => setMaxPlayers(count)}
-                      className={`py-2.5 rounded-xl text-xs font-black transition cursor-pointer ${
-                        maxPlayers === count
-                          ? 'bg-amber-400 text-slate-950 shadow-xs'
-                          : 'bg-slate-100 text-slate-600 hover:bg-slate-200/80 border border-slate-200'
-                      }`}
-                    >
-                      {count} ဦး
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Exact Finish Rule Toggle */}
-              <div className="flex items-center justify-between p-3.5 bg-slate-50 rounded-2xl border border-slate-200">
-                <div>
-                  <div className="text-xs font-bold text-slate-900">အတိအကျ ဝင်ရန် လို/မလို စည်းမျဉ်း</div>
-                  <div className="text-[11px] text-slate-500">၁၀၀ သို့ရောက်ရန် အံစာတုံးနံပါတ် အတိအကျလိုအပ်သည်</div>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={exactFinishRule}
-                  onChange={(e) => setExactFinishRule(e.target.checked)}
-                  className="w-5 h-5 accent-amber-500 rounded cursor-pointer"
-                />
-              </div>
-
-              {/* Action Buttons */}
-              <div className="flex gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowCreateModal(false)}
-                  className="flex-1 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs transition cursor-pointer"
-                >
-                  ပယ်ဖျက်
-                </button>
-                <button
-                  type="button"
-                  onClick={handleCreateRoom}
-                  disabled={isSubmitting}
-                  className="flex-1 py-3 rounded-xl bg-amber-400 hover:bg-amber-500 text-slate-950 font-black text-xs transition shadow-xs cursor-pointer disabled:opacity-50"
-                >
-                  {isSubmitting ? 'ဖန်တီးနေသည်...' : 'အခန်းဖွင့်မည်'}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* SHARED CREATE ROOM MODAL */}
+      <CreateRoomModal
+        isOpen={showCreateModal}
+        initialGameId={createModalGameId}
+        onClose={() => setShowCreateModal(false)}
+        onRoomCreated={(roomId, room) => onEnterRoom(roomId, room)}
+      />
 
       {/* JOIN ROOM MODAL */}
       {showJoinModal && (

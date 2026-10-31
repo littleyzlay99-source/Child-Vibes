@@ -7,19 +7,38 @@ import {
 } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from '../lib/firebase';
 import {
+  DEFAULT_GAME_ID,
+  GameRegistryEntry,
+  getGameById,
+  RegisteredGameId,
+} from '../games/registry';
+import {
+  BaseGameRoomOptions,
+  CreateGameRoomOptions,
   GameRoom,
   JoinRoomResult,
-  PlayerPositionRecord,
   PlayerPresenceEntry,
-  RoomPlayer,
   RoomStatus,
+  SnakesAndLaddersRoomOptions,
   UserProfile,
 } from '../types';
 import { GAME_CONFIG } from '../config/gameRules';
 import { markGameSessionExited, saveActiveGameSession } from './gameSessionService';
+import {
+  buildPlayerPositionsMap,
+  computeLobbyStatus,
+  deduplicateRoomPlayers,
+  normalizeMaxPlayers,
+  resolveAuthoritativePlayer,
+  sanitizePlayer,
+} from './roomStateHelpers';
+
+export { computeLobbyStatus, deduplicateRoomPlayers, normalizeMaxPlayers };
 
 export type RoomJoinErrorCode =
   | 'INVALID_CODE'
+  | 'INVALID_GAME_TYPE'
+  | 'GAME_UNAVAILABLE'
   | 'NOT_FOUND'
   | 'ROOM_FULL'
   | 'GAME_PLAYING'
@@ -39,23 +58,6 @@ export class RoomJoinError extends Error {
 
 // Coalesce concurrent join requests from the same client/player for the same room code
 const inFlightJoins = new Map<string, Promise<JoinRoomResult>>();
-
-/**
- * Normalize room capacity to a valid integer [2..4]
- */
-export function normalizeMaxPlayers(maxPlayers: unknown): number {
-  const parsed = Number(maxPlayers);
-  if (!Number.isFinite(parsed) || parsed < 2) return 2;
-  if (parsed > 4) return 4;
-  return Math.floor(parsed);
-}
-
-/**
- * Compute authoritative lobby status ('waiting' vs 'full') from unique active player count
- */
-export function computeLobbyStatus(uniquePlayerCount: number, maxPlayers: number): 'waiting' | 'full' {
-  return uniquePlayerCount >= normalizeMaxPlayers(maxPlayers) ? 'full' : 'waiting';
-}
 
 // Generate a random 6-character room code (e.g. SG8K29)
 export function generateRoomCode(): string {
@@ -78,126 +80,6 @@ export function generateUniqueMoveId(now: number = Date.now()): string {
     return `mv_${now}_${arr[0].toString(36)}${arr[1].toString(36)}`;
   }
   return `mv_${now}_${Math.random().toString(36).substring(2, 10)}`;
-}
-
-/**
- * Sanitize a RoomPlayer object so no `undefined` field ever enters Firestore,
- * while strictly preserving position and positionVersion.
- */
-function sanitizePlayer(
-  p: RoomPlayer,
-  now: number,
-  overrides?: Partial<RoomPlayer>
-): RoomPlayer {
-  const merged = { ...p, ...(overrides || {}) };
-  const safePos =
-    typeof merged.position === 'number' && !isNaN(merged.position)
-      ? Math.max(1, Math.min(100, Math.round(merged.position)))
-      : 1;
-  const safeVer =
-    typeof merged.positionVersion === 'number' &&
-    !isNaN(merged.positionVersion) &&
-    merged.positionVersion >= 1
-      ? Math.floor(merged.positionVersion)
-      : 1;
-
-  const clean: RoomPlayer = {
-    uid: merged.uid,
-    playerId: merged.playerId || `PL-${merged.uid.substring(0, 6)}`,
-    displayName: merged.displayName || 'ကစားသမား',
-    photoURL: merged.photoURL || '',
-    isReady: !!merged.isReady,
-    color: merged.color || '#3B82F6',
-    position: safePos,
-    positionVersion: safeVer,
-    lastMoveId: merged.lastMoveId ?? null,
-    updatedAtMs: typeof merged.updatedAtMs === 'number' ? merged.updatedAtMs : now,
-    activeTokenSkin: merged.activeTokenSkin || 'token_crown',
-    isConnected: merged.isConnected !== false,
-    lastSeen: typeof merged.lastSeen === 'number' ? merged.lastSeen : now,
-  };
-
-  if (merged.rank !== undefined && merged.rank !== null) {
-    clean.rank = merged.rank;
-  }
-  if (merged.disconnectedAt !== undefined) {
-    clean.disconnectedAt = merged.disconnectedAt;
-  }
-
-  return clean;
-}
-
-/**
- * Reconcile a player's state against the authoritative `playerPositions` map,
- * always keeping whichever record has the higher `positionVersion`.
- */
-function resolveAuthoritativePlayer(
-  p: RoomPlayer,
-  playerPositions: Record<string, PlayerPositionRecord> | undefined,
-  now: number
-): RoomPlayer {
-  const mapRec = playerPositions?.[p.uid];
-  const pVer =
-    typeof p.positionVersion === 'number' && p.positionVersion >= 1 ? p.positionVersion : 1;
-  const mapVer = typeof mapRec?.positionVersion === 'number' ? mapRec.positionVersion : 0;
-
-  if (mapRec && mapVer > pVer) {
-    return sanitizePlayer(p, now, {
-      position: mapRec.position,
-      positionVersion: mapVer,
-      lastMoveId: mapRec.lastMoveId ?? null,
-      updatedAtMs: mapRec.updatedAtMs || now,
-    });
-  }
-
-  return sanitizePlayer(p, now, {
-    position: p.position || 1,
-    positionVersion: pVer,
-    lastMoveId: p.lastMoveId ?? mapRec?.lastMoveId ?? null,
-    updatedAtMs: p.updatedAtMs ?? mapRec?.updatedAtMs ?? now,
-  });
-}
-
-/**
- * Deduplicate and reconcile room players strictly by unique `uid`.
- * Prevents Host double-counting and duplicate player entries while preserving
- * the highest `positionVersion` and latest connection metadata.
- */
-export function deduplicateRoomPlayers(
-  players: RoomPlayer[] | undefined | null,
-  playerPositions?: Record<string, PlayerPositionRecord>,
-  now: number = Date.now()
-): RoomPlayer[] {
-  if (!Array.isArray(players) || players.length === 0) return [];
-  const byUid = new Map<string, RoomPlayer>();
-
-  for (const rawPlayer of players) {
-    if (!rawPlayer || typeof rawPlayer.uid !== 'string' || !rawPlayer.uid.trim()) {
-      continue;
-    }
-    const uid = rawPlayer.uid.trim();
-    const resolved = resolveAuthoritativePlayer({ ...rawPlayer, uid }, playerPositions, now);
-    const existing = byUid.get(uid);
-
-    if (!existing) {
-      byUid.set(uid, resolved);
-    } else {
-      const existingVer = existing.positionVersion || 1;
-      const incomingVer = resolved.positionVersion || 1;
-      const winner = incomingVer >= existingVer ? resolved : existing;
-      const loser = incomingVer >= existingVer ? existing : resolved;
-      byUid.set(
-        uid,
-        sanitizePlayer(winner, now, {
-          isReady: winner.isReady || loser.isReady,
-          isConnected: winner.isConnected !== false || loser.isConnected !== false,
-          lastSeen: Math.max(winner.lastSeen || 0, loser.lastSeen || 0),
-        })
-      );
-    }
-  }
-
-  return Array.from(byUid.values());
 }
 
 /**
@@ -247,43 +129,133 @@ function classifyJoinError(error: unknown, roomPath: string): RoomJoinError {
   );
 }
 
-/**
- * Synchronize the per-player authoritative `playerPositions` map from sanitized players.
- */
-function buildPlayerPositionsMap(
-  players: RoomPlayer[],
-  now: number
-): Record<string, PlayerPositionRecord> {
-  const map: Record<string, PlayerPositionRecord> = {};
-  for (const p of players) {
-    map[p.uid] = {
-      position: p.position || 1,
-      positionVersion: p.positionVersion || 1,
-      lastMoveId: p.lastMoveId ?? null,
-      updatedAtMs: p.updatedAtMs || now,
-    };
-  }
-  return map;
+export interface ResolvedCreateRoomConfig {
+  gameType: RegisteredGameId;
+  registryEntry: GameRegistryEntry;
+  maxPlayers: number;
+  exactFinish: boolean;
 }
 
 /**
- * Create a new Game Room
+ * Clamp room maxPlayers within both platform/Firestore multiplayer bounds [2..4]
+ * and the specific game's registered [minPlayers..maxPlayers] bounds.
  */
-export async function createGameRoom(
-  hostUser: UserProfile,
-  maxPlayersInput: number = 4,
-  exactFinish: boolean = false
-): Promise<JoinRoomResult> {
-  const effectiveHostUid = auth.currentUser?.uid || hostUser.id;
-  if (!effectiveHostUid) {
-    throw new RoomJoinError('AUTH_REQUIRED', 'ကျေးဇူးပြု၍ အကောင့်အရင်ဝင်ရောက်ပေးပါ။');
+function clampRoomMaxPlayersForGame(
+  maxPlayersInput: unknown,
+  gameEntry: GameRegistryEntry
+): number {
+  const minAllowed = Math.max(2, Math.min(4, Math.floor(gameEntry.minPlayers)));
+  const maxAllowed = Math.max(minAllowed, Math.min(4, Math.floor(gameEntry.maxPlayers)));
+
+  if (maxPlayersInput === undefined) {
+    return maxAllowed;
   }
 
-  const maxPlayers = normalizeMaxPlayers(maxPlayersInput);
-  const roomCode = generateRoomCode();
+  const normalized = normalizeMaxPlayers(maxPlayersInput);
+  return Math.max(minAllowed, Math.min(maxAllowed, normalized));
+}
+
+/**
+ * Resolve legacy positional arguments vs multi-game (gameType, gameOptions) arguments,
+ * and strictly validate gameType against the Central Game Registry ('available' games only).
+ */
+export function resolveCreateGameRoomInput(
+  gameTypeOrMaxPlayers?: unknown,
+  gameOptionsOrExactFinish?: unknown
+): ResolvedCreateRoomConfig {
+  const isLegacyPositionalCall =
+    (typeof gameTypeOrMaxPlayers === 'number' &&
+      (gameOptionsOrExactFinish === undefined ||
+        typeof gameOptionsOrExactFinish === 'boolean')) ||
+    (gameTypeOrMaxPlayers === undefined && typeof gameOptionsOrExactFinish === 'boolean');
+
+  let rawGameType: string;
+  let rawOptions: Partial<SnakesAndLaddersRoomOptions> = {};
+
+  if (isLegacyPositionalCall) {
+    rawGameType = DEFAULT_GAME_ID;
+    rawOptions = {
+      maxPlayers:
+        typeof gameTypeOrMaxPlayers === 'number' ? gameTypeOrMaxPlayers : undefined,
+      exactFinish: Boolean(gameOptionsOrExactFinish ?? false),
+    };
+  } else {
+    if (gameTypeOrMaxPlayers === undefined) {
+      rawGameType = DEFAULT_GAME_ID;
+    } else if (typeof gameTypeOrMaxPlayers === 'string') {
+      const trimmed = gameTypeOrMaxPlayers.trim();
+      if (!trimmed) {
+        throw new RoomJoinError(
+          'INVALID_GAME_TYPE',
+          'ဂိမ်းအမျိုးအစား (gameType) သည် အလွတ်ဖြစ်နေ၍ မရပါ။'
+        );
+      }
+      rawGameType = trimmed;
+    } else {
+      throw new RoomJoinError(
+        'INVALID_GAME_TYPE',
+        'ရွေးချယ်ထားသော ဂိမ်းအမျိုးအစား မမှန်ကန်ပါ။'
+      );
+    }
+
+    if (gameOptionsOrExactFinish !== undefined) {
+      if (
+        gameOptionsOrExactFinish === null ||
+        typeof gameOptionsOrExactFinish !== 'object' ||
+        Array.isArray(gameOptionsOrExactFinish)
+      ) {
+        throw new RoomJoinError(
+          'INVALID_GAME_TYPE',
+          'ဂိမ်းအခန်း သတ်မှတ်ချက် (gameOptions) ပုံစံ မမှန်ကန်ပါ။'
+        );
+      }
+      rawOptions = gameOptionsOrExactFinish as Partial<SnakesAndLaddersRoomOptions>;
+    }
+  }
+
+  const registryEntry = getGameById(rawGameType);
+  if (!registryEntry) {
+    throw new RoomJoinError(
+      'INVALID_GAME_TYPE',
+      'ရွေးချယ်ထားသော ဂိမ်းအမျိုးအစားသည် စာရင်းသွင်းထားခြင်း မရှိပါ။'
+    );
+  }
+
+  if (registryEntry.status !== 'available') {
+    throw new RoomJoinError(
+      'GAME_UNAVAILABLE',
+      `${registryEntry.shortTitle} ဂိမ်းကို လက်ရှိတွင် အခန်းဖွင့် ကစား၍ မရနိုင်သေးပါ (မကြာမီလာမည်)။`
+    );
+  }
+
+  const maxPlayers = clampRoomMaxPlayersForGame(rawOptions.maxPlayers, registryEntry);
+  const exactFinish =
+    registryEntry.id === 'snakes_and_ladders'
+      ? Boolean(rawOptions.exactFinish ?? false)
+      : false;
+
+  return {
+    gameType: registryEntry.id,
+    registryEntry,
+    maxPlayers,
+    exactFinish,
+  };
+}
+
+/**
+ * Construct the initial authoritative GameRoom document payload.
+ * Preserves 100% identical field structure and defaults for Snakes & Ladders.
+ */
+export function buildInitialGameRoom(params: {
+  hostUser: UserProfile;
+  effectiveHostUid: string;
+  roomCode: string;
+  resolved: ResolvedCreateRoomConfig;
+  now?: number;
+}): GameRoom {
+  const { hostUser, effectiveHostUid, roomCode, resolved, now = Date.now() } = params;
   const roomId = `room_${roomCode}`;
-  const roomRef = doc(db, 'rooms', roomId);
-  const now = Date.now();
+  const isoTimestamp = new Date(now).toISOString();
 
   const initialPlayer = sanitizePlayer(
     {
@@ -313,14 +285,14 @@ export async function createGameRoom(
     },
   };
 
-  const newRoom: GameRoom = {
+  return {
     id: roomId,
     roomCode,
-    gameType: 'snakes_and_ladders',
+    gameType: resolved.gameType,
     hostId: effectiveHostUid,
     hostName: hostUser.displayName,
     status: 'waiting',
-    maxPlayers,
+    maxPlayers: resolved.maxPlayers,
     playerCount: 1,
     players: [initialPlayer],
     currentTurnIndex: 0,
@@ -329,7 +301,7 @@ export async function createGameRoom(
     winnerId: null,
     winnerName: null,
     matchParticipantIds: [],
-    exactFinish,
+    exactFinish: resolved.exactFinish,
     stateVersion: 1,
     gameRound: 1,
     lastMoveId: null,
@@ -343,9 +315,52 @@ export async function createGameRoom(
     lastMoveTimestamp: now,
     lastMovePath: [],
     lastMovingPlayerUid: null,
-    createdAt: new Date(now).toISOString(),
-    updatedAt: new Date(now).toISOString(),
+    createdAt: isoTimestamp,
+    updatedAt: isoTimestamp,
   };
+}
+
+/**
+ * Create a new Game Room (Multi-Game Ready + Legacy Backward Compatible)
+ * - New signature: createGameRoom(hostUser, gameType?, gameOptions?)
+ * - Legacy signature: createGameRoom(hostUser, maxPlayersInput?, exactFinish?)
+ */
+export async function createGameRoom<K extends RegisteredGameId = 'snakes_and_ladders'>(
+  hostUser: UserProfile,
+  gameType?: K,
+  gameOptions?: CreateGameRoomOptions<K>
+): Promise<JoinRoomResult>;
+export async function createGameRoom(
+  hostUser: UserProfile,
+  maxPlayersInput?: number,
+  exactFinish?: boolean
+): Promise<JoinRoomResult>;
+export async function createGameRoom(
+  hostUser: UserProfile,
+  gameTypeOrMaxPlayers?: RegisteredGameId | string | number,
+  gameOptionsOrExactFinish?: SnakesAndLaddersRoomOptions | BaseGameRoomOptions | boolean
+): Promise<JoinRoomResult> {
+  const effectiveHostUid = auth.currentUser?.uid || hostUser?.id;
+  if (!effectiveHostUid) {
+    throw new RoomJoinError('AUTH_REQUIRED', 'ကျေးဇူးပြု၍ အကောင့်အရင်ဝင်ရောက်ပေးပါ။');
+  }
+
+  const resolved = resolveCreateGameRoomInput(
+    gameTypeOrMaxPlayers,
+    gameOptionsOrExactFinish
+  );
+
+  const roomCode = generateRoomCode();
+  const now = Date.now();
+  const newRoom = buildInitialGameRoom({
+    hostUser,
+    effectiveHostUid,
+    roomCode,
+    resolved,
+    now,
+  });
+  const roomId = newRoom.id;
+  const roomRef = doc(db, 'rooms', roomId);
 
   try {
     await setDoc(roomRef, {

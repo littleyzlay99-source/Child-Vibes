@@ -1,10 +1,16 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { collection, query, where, onSnapshot } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
+import {
+  DEFAULT_GAME_ID,
+  RegisteredGameId,
+  getAvailableGames,
+  getGameById,
+  getGameTitle,
+} from '../../games/registry';
 import { GameRoom } from '../../types';
 import { useAuth } from '../../contexts/AuthContext';
 import {
-  createGameRoom,
   joinGameRoomByCode,
   deduplicateRoomPlayers,
   normalizeMaxPlayers,
@@ -12,6 +18,7 @@ import {
   RoomJoinErrorCode,
 } from '../../services/roomService';
 import { sounds } from '../../lib/sound';
+import { CreateRoomModal } from './CreateRoomModal';
 import {
   Users,
   PlusCircle,
@@ -26,15 +33,37 @@ interface RoomsBrowseViewProps {
   onEnterRoom: (roomId: string, room?: GameRoom) => void;
 }
 
+export type RoomGameFilterValue = 'all' | RegisteredGameId;
+
+/**
+ * Normalize a room's gameType for filter matching while preserving backward compatibility
+ * for legacy room documents that omitted gameType.
+ */
+export function normalizeRoomGameType(gameType?: string | null): string {
+  const trimmed = typeof gameType === 'string' ? gameType.trim() : '';
+  return trimmed || DEFAULT_GAME_ID;
+}
+
+/**
+ * Pure client-side room filter by gameType (zero extra Firestore reads/listeners).
+ */
+export function filterRoomsByGameType(
+  rooms: GameRoom[],
+  selectedFilter: RoomGameFilterValue
+): GameRoom[] {
+  if (selectedFilter === 'all') {
+    return rooms;
+  }
+  return rooms.filter((room) => normalizeRoomGameType(room.gameType) === selectedFilter);
+}
+
 export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom }) => {
   const { currentUser, userProfile } = useAuth();
   const [rooms, setRooms] = useState<GameRoom[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
+  const [selectedGameFilter, setSelectedGameFilter] = useState<RoomGameFilterValue>('all');
   const [joinCodeInput, setJoinCodeInput] = useState<string>('');
   const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
-  const [maxPlayers, setMaxPlayers] = useState<number>(4);
-  const [exactFinishRule, setExactFinishRule] = useState<boolean>(false);
-  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [joiningRoomCode, setJoiningRoomCode] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [errorCode, setErrorCode] = useState<RoomJoinErrorCode | null>(null);
@@ -55,6 +84,10 @@ export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom })
         const list: GameRoom[] = [];
         snapshot.forEach((docSnap) => {
           const data = docSnap.data() as GameRoom;
+          const effectiveGameId = normalizeRoomGameType(data.gameType);
+          if (getGameById(effectiveGameId)?.status !== 'available') {
+            return;
+          }
           const uniquePlayers = deduplicateRoomPlayers(data.players, data.playerPositions);
           const normalizedMax = normalizeMaxPlayers(data.maxPlayers);
           list.push({
@@ -84,28 +117,35 @@ export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom })
     };
   }, []);
 
-  const handleCreate = async () => {
-    if (!userProfile || actionLockRef.current || isSubmitting) return;
-    actionLockRef.current = true;
-    setIsSubmitting(true);
-    setErrorMsg(null);
-    setErrorCode(null);
-    sounds.playClick();
+  const availableGames = useMemo(() => getAvailableGames(), []);
 
-    try {
-      const result = await createGameRoom(userProfile, maxPlayers, exactFinishRule);
-      setShowCreateModal(false);
-      actionLockRef.current = false;
-      onEnterRoom(result.roomId, result.room);
-    } catch (err: any) {
-      if (isMountedRef.current) {
-        setErrorCode(err instanceof RoomJoinError ? err.code : 'UNKNOWN_ERROR');
-        setErrorMsg(err?.message || 'အခန်းဖွင့်ခြင်း မအောင်မြင်ပါ');
-        setIsSubmitting(false);
-      }
-      actionLockRef.current = false;
+  const filterTabs = useMemo(() => {
+    const countsByGame: Record<string, number> = {};
+    for (const room of rooms) {
+      const normalized = normalizeRoomGameType(room.gameType);
+      countsByGame[normalized] = (countsByGame[normalized] || 0) + 1;
     }
-  };
+
+    return [
+      {
+        id: 'all' as RoomGameFilterValue,
+        label: 'ဂိမ်းအားလုံး',
+        icon: '🎮',
+        count: rooms.length,
+      },
+      ...availableGames.map((game) => ({
+        id: game.id as RoomGameFilterValue,
+        label: game.shortTitle,
+        icon: game.icon,
+        count: countsByGame[game.id] || 0,
+      })),
+    ];
+  }, [availableGames, rooms]);
+
+  const filteredRooms = useMemo(
+    () => filterRoomsByGameType(rooms, selectedGameFilter),
+    [rooms, selectedGameFilter]
+  );
 
   const handleJoinDirect = async (roomCode: string) => {
     const cleaned = roomCode.replace(/^#/, '').trim().toUpperCase();
@@ -141,10 +181,12 @@ export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom })
   };
 
   const currentUid = currentUser?.uid || userProfile?.id;
-  const isBusy = isSubmitting || joiningRoomCode !== null;
+  const isBusy = joiningRoomCode !== null;
+  const preferredCreateGameId: RegisteredGameId =
+    selectedGameFilter === 'all' ? DEFAULT_GAME_ID : selectedGameFilter;
 
   return (
-    <div className="max-w-5xl mx-auto p-4 md:p-6 space-y-6">
+    <div className="max-w-5xl mx-auto p-4 md:p-6 space-y-5">
       {/* Top Controls Bar */}
       <div className="bg-white/95 border border-slate-200/90 rounded-3xl p-6 shadow-sm flex flex-col md:flex-row items-center justify-between gap-4 backdrop-blur-md">
         <div>
@@ -167,7 +209,7 @@ export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom })
               onChange={(e) => setJoinCodeInput(e.target.value.toUpperCase())}
               maxLength={8}
               disabled={isBusy}
-              className="w-full bg-slate-50 text-amber-800 font-mono text-xs font-bold pl-3 pr-8 py-2.5 rounded-xl border border-slate-300 focus:border-amber-400 focus:bg-white focus:outline-hidden disabled:opacity-60"
+              className="w-full min-h-[42px] bg-slate-50 text-amber-800 font-mono text-xs font-bold pl-3 pr-8 py-2.5 rounded-xl border border-slate-300 focus:border-amber-400 focus:bg-white focus:outline-hidden disabled:opacity-60"
             />
             <button
               type="submit"
@@ -180,19 +222,63 @@ export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom })
           </form>
 
           <button
+            type="button"
             onClick={() => {
               if (isBusy) return;
               sounds.playClick();
               setErrorMsg(null);
+              setErrorCode(null);
               setShowCreateModal(true);
             }}
             disabled={isBusy}
-            className="px-5 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs md:text-sm flex items-center gap-1.5 shadow-sm transition cursor-pointer whitespace-nowrap disabled:opacity-60"
+            className="min-h-[42px] px-5 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs md:text-sm flex items-center gap-1.5 shadow-sm transition cursor-pointer whitespace-nowrap disabled:opacity-60"
           >
             <PlusCircle className="w-4 h-4" />
             <span>အခန်းအသစ်ဖွင့်မည်</span>
           </button>
         </div>
+      </div>
+
+      {/* Client-Side Game Filter Bar (Sourced from Central Game Registry) */}
+      <div
+        className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none"
+        role="tablist"
+        aria-label="ဂိမ်းအလိုက် အခန်းစစ်ထုတ်ရန်"
+      >
+        {filterTabs.map((tab) => {
+          const isActive = selectedGameFilter === tab.id;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={isActive}
+              onClick={() => {
+                sounds.playClick();
+                setSelectedGameFilter(tab.id);
+              }}
+              className={`min-h-[42px] px-4 py-2 rounded-xl text-xs md:text-sm font-bold flex items-center gap-2 whitespace-nowrap transition cursor-pointer ${
+                isActive
+                  ? 'bg-amber-400 text-slate-950 shadow-xs'
+                  : 'bg-white hover:bg-slate-50 text-slate-600 border border-slate-200/90'
+              }`}
+            >
+              <span>{tab.icon}</span>
+              <span>{tab.label}</span>
+              {!loading && (
+                <span
+                  className={`px-1.5 py-0.5 rounded-md text-[11px] font-black tabular-nums ${
+                    isActive
+                      ? 'bg-slate-950/15 text-slate-950'
+                      : 'bg-slate-100 text-slate-600'
+                  }`}
+                >
+                  {tab.count}
+                </span>
+              )}
+            </button>
+          );
+        })}
       </div>
 
       {/* Distinct Error Banner (Network Error vs Room Full / Validation Error) */}
@@ -231,31 +317,53 @@ export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom })
           <div className="w-8 h-8 border-2 border-amber-400 border-t-transparent rounded-full animate-spin mb-3" />
           <span>အခန်းများ ရှာဖွေနေပါသည်...</span>
         </div>
-      ) : rooms.length === 0 ? (
-        <div className="bg-white border border-slate-200/90 rounded-3xl p-12 text-center space-y-3 shadow-xs">
+      ) : filteredRooms.length === 0 ? (
+        <div className="bg-white border border-slate-200/90 rounded-3xl p-10 sm:p-12 text-center space-y-3 shadow-xs">
           <div className="w-16 h-16 rounded-2xl bg-amber-50 border border-amber-200 flex items-center justify-center text-3xl mx-auto">
-            🚪
+            {selectedGameFilter === 'all'
+              ? '🚪'
+              : getGameById(selectedGameFilter)?.icon || '🎮'}
           </div>
-          <h3 className="text-base font-bold text-slate-900">လက်ရှိတွင် ဖွင့်ထားသော အခန်း မရှိသေးပါ</h3>
+          <h3 className="text-base font-bold text-slate-900">
+            {selectedGameFilter === 'all'
+              ? 'လက်ရှိတွင် ဖွင့်ထားသော အခန်း မရှိသေးပါ'
+              : `${getGameTitle(selectedGameFilter)} ဂိမ်းအတွက် ဖွင့်ထားသော အခန်း မရှိသေးပါ`}
+          </h3>
           <p className="text-xs text-slate-500 max-w-sm mx-auto">
-            သင်ကိုယ်တိုင် အခန်းအသစ်ဖန်တီးပြီး ရရှိလာသော Room Code သို့မဟုတ် Link ဖြင့် သူငယ်ချင်းများကို
-            ဖိတ်ခေါ်ကစားနိုင်ပါသည်။
+            {selectedGameFilter !== 'all' && rooms.length > 0
+              ? 'အခြားဂိမ်းအခန်းများကို ကြည့်ရှုနိုင်သလို ဤဂိမ်းအတွက် ကိုယ်တိုင် အခန်းအသစ် ဖန်တီးနိုင်ပါသည်။'
+              : 'သင်ကိုယ်တိုင် အခန်းအသစ်ဖန်တီးပြီး ရရှိလာသော Room Code သို့မဟုတ် Link ဖြင့် သူငယ်ချင်းများကို ဖိတ်ခေါ်ကစားနိုင်ပါသည်။'}
           </p>
-          <button
-            onClick={() => {
-              sounds.playClick();
-              setShowCreateModal(true);
-            }}
-            disabled={isBusy}
-            className="mt-2 px-6 py-3 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs inline-flex items-center gap-2 shadow-xs cursor-pointer disabled:opacity-60"
-          >
-            <PlusCircle className="w-4 h-4" />
-            <span>အခန်းအသစ် ဖန်တီးမည်</span>
-          </button>
+          <div className="flex flex-wrap items-center justify-center gap-2.5 pt-2">
+            {selectedGameFilter !== 'all' && rooms.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  sounds.playClick();
+                  setSelectedGameFilter('all');
+                }}
+                className="min-h-[42px] px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs inline-flex items-center gap-1.5 transition cursor-pointer"
+              >
+                <span>ဂိမ်းအားလုံး ကြည့်မည်</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                sounds.playClick();
+                setShowCreateModal(true);
+              }}
+              disabled={isBusy}
+              className="min-h-[42px] px-6 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs inline-flex items-center gap-2 shadow-xs cursor-pointer disabled:opacity-60"
+            >
+              <PlusCircle className="w-4 h-4" />
+              <span>အခန်းအသစ် ဖန်တီးမည်</span>
+            </button>
+          </div>
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {rooms.map((room) => {
+          {filteredRooms.map((room) => {
             const uniquePlayers = deduplicateRoomPlayers(room.players, room.playerPositions);
             const maxCap = normalizeMaxPlayers(room.maxPlayers);
             const activeCount = uniquePlayers.length;
@@ -264,6 +372,11 @@ export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom })
             const isCapacityFull = activeCount >= maxCap;
             const isBlockedByFull = !isAlreadyJoined && isCapacityFull;
             const isJoiningThisRoom = joiningRoomCode === room.roomCode;
+
+            const effectiveGameType = normalizeRoomGameType(room.gameType);
+            const roomGameEntry = getGameById(effectiveGameType);
+            const roomGameTitle = getGameTitle(room.gameType);
+            const roomGameIcon = roomGameEntry?.icon || '🎮';
 
             return (
               <div
@@ -290,7 +403,7 @@ export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom })
                           Waiting
                         </span>
                       )}
-                      <span className="px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-700 text-[11px] font-bold border border-slate-200">
+                      <span className="px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-700 text-[11px] font-bold border border-slate-200 tabular-nums">
                         {activeCount} / {maxCap} ဦး
                       </span>
                     </div>
@@ -308,16 +421,28 @@ export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom })
                     </div>
                   </div>
 
-                  <div className="text-[11px] text-slate-600 mb-4 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                    <div>ဂိမ်း: မြွေနှင့်လှေကား (10x10)</div>
-                    <div>စည်းမျဉ်း: {room.exactFinish ? 'အတိအကျဝင်ရန်လို' : 'သာမန်စည်းမျဉ်း'}</div>
+                  <div className="text-[11px] text-slate-600 mb-4 bg-slate-50 p-2.5 rounded-xl border border-slate-200 space-y-0.5">
+                    <div className="font-semibold text-slate-800 flex items-center gap-1.5">
+                      <span>{roomGameIcon}</span>
+                      <span className="truncate">ဂိမ်း: {roomGameTitle}</span>
+                    </div>
+                    {effectiveGameType === 'snakes_and_ladders' ? (
+                      <div>
+                        စည်းမျဉ်း: {room.exactFinish ? 'အတိအကျဝင်ရန်လို' : 'သာမန်စည်းမျဉ်း'}
+                      </div>
+                    ) : (
+                      <div>
+                        ကစားသမား: {roomGameEntry ? `${roomGameEntry.minPlayers} - ${roomGameEntry.maxPlayers} ဦး` : `${maxCap} ဦး`}
+                      </div>
+                    )}
                   </div>
                 </div>
 
                 <button
+                  type="button"
                   onClick={() => handleJoinDirect(room.roomCode)}
                   disabled={isBlockedByFull || isBusy}
-                  className={`w-full py-2.5 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition ${
+                  className={`w-full min-h-[42px] py-2.5 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition ${
                     isJoiningThisRoom
                       ? 'bg-amber-300 text-slate-950 cursor-wait'
                       : isAlreadyJoined
@@ -352,73 +477,13 @@ export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom })
         </div>
       )}
 
-      {/* CREATE MODAL */}
-      {showCreateModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-xs animate-in fade-in">
-          <div className="bg-white border border-slate-200 rounded-3xl p-6 md:p-8 max-w-md w-full shadow-2xl relative">
-            <h3 className="text-xl font-black text-slate-900 mb-2">အခန်းအသစ် ဖန်တီးမည်</h3>
-            <p className="text-xs text-slate-500 mb-6">
-              အခန်းဖွင့်ပြီးပါက Room Code ဖြင့် သူငယ်ချင်းများကို ဖိတ်ခေါ်နိုင်ပါသည်
-            </p>
-
-            <div className="space-y-4">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-2">
-                  ကစားသမား အရေအတွက် ရွေးချယ်ပါ
-                </label>
-                <div className="grid grid-cols-3 gap-2">
-                  {[2, 3, 4].map((count) => (
-                    <button
-                      key={count}
-                      type="button"
-                      onClick={() => setMaxPlayers(count)}
-                      className={`py-2.5 rounded-xl text-xs font-black transition cursor-pointer ${
-                        maxPlayers === count
-                          ? 'bg-amber-400 text-slate-950 shadow-xs'
-                          : 'bg-slate-100 text-slate-600 border border-slate-200'
-                      }`}
-                    >
-                      {count} ဦး
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between p-3.5 bg-slate-50 rounded-2xl border border-slate-200">
-                <div>
-                  <div className="text-xs font-bold text-slate-800">အတိအကျ ဝင်ရန် လို/မလို စည်းမျဉ်း</div>
-                  <div className="text-[11px] text-slate-500">၁၀၀ သို့ရောက်ရန် အံစာတုံးနံပါတ် အတိအကျလိုအပ်သည်</div>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={exactFinishRule}
-                  onChange={(e) => setExactFinishRule(e.target.checked)}
-                  className="w-5 h-5 accent-amber-500 rounded cursor-pointer"
-                />
-              </div>
-
-              <div className="flex gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowCreateModal(false)}
-                  disabled={isSubmitting}
-                  className="flex-1 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs transition cursor-pointer disabled:opacity-50"
-                >
-                  ပယ်ဖျက်
-                </button>
-                <button
-                  type="button"
-                  onClick={handleCreate}
-                  disabled={isSubmitting}
-                  className="flex-1 py-3 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs transition shadow-sm cursor-pointer disabled:opacity-50"
-                >
-                  {isSubmitting ? 'ဖန်တီးနေသည်...' : 'အခန်းဖွင့်မည်'}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Shared Multi-Game Create Room Modal */}
+      <CreateRoomModal
+        isOpen={showCreateModal}
+        initialGameId={preferredCreateGameId}
+        onClose={() => setShowCreateModal(false)}
+        onRoomCreated={(roomId, room) => onEnterRoom(roomId, room)}
+      />
     </div>
   );
 };

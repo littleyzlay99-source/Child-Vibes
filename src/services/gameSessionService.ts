@@ -1,7 +1,8 @@
 import { doc, getDoc, updateDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
+import { getGameById, UNKNOWN_GAME_FALLBACK_TITLE } from '../games/registry';
 import { ActiveGameSession, GameRoom } from '../types';
-import { deduplicateRoomPlayers, normalizeMaxPlayers } from './roomService';
+import { deduplicateRoomPlayers, normalizeMaxPlayers } from './roomStateHelpers';
 import { claimMatchReward } from './rewardService';
 
 const LEGACY_SESSION_KEY = 'child_vibes_active_room_id';
@@ -10,20 +11,12 @@ const EXITED_ROOMS_KEY_PREFIX = 'child_vibes_exited_rooms_v2_';
 const MAX_SESSION_STALE_MS = 6 * 60 * 60 * 1000; // 6 hours safety bound for abandoned rooms
 
 /**
- * Shared title registry for current & future mini-games inside Dedicated Game Mode
+ * Resolve mini-game display title inside Dedicated Game Mode from the Central Game Registry.
+ * Strictly returns the registered game's shortTitle or 'မီနီဂိမ်း' for empty/unknown IDs
+ * so Dedicated Game Mode never mislabels an unsupported or empty room as Snakes & Ladders.
  */
-export const GAME_TITLES_BY_TYPE: Record<string, string> = {
-  snakes_and_ladders: 'မြွေနှင့်လှေကား',
-  ludo_king: 'ရွှေလုဒို',
-  burmese_chess: 'မြန်မာ့စစ်တုရင်',
-  word_puzzle: 'မြန်မာစကားထာ ပဟေဠိ',
-  space_arcade: 'အာကာသစစ်သည်',
-  kart_racing: 'မီနီ ကားပြိုင်ပွဲ',
-};
-
 export function getMiniGameTitle(gameType?: string | null): string {
-  if (!gameType) return GAME_TITLES_BY_TYPE.snakes_and_ladders;
-  return GAME_TITLES_BY_TYPE[gameType] || 'မီနီဂိမ်း';
+  return getGameById(gameType)?.shortTitle || UNKNOWN_GAME_FALLBACK_TITLE;
 }
 
 function getSafeStorage(kind: 'local' | 'session'): Storage | null {

@@ -1,3 +1,19 @@
+import type {
+  RegisteredGameId,
+  GameStatus,
+  GameCategory,
+  GameDifficulty,
+  GameRegistryEntry,
+} from '../games/registry';
+
+export type {
+  RegisteredGameId,
+  GameStatus,
+  GameCategory,
+  GameDifficulty,
+  GameRegistryEntry,
+};
+
 export type RewardSourceType =
   | 'match_win'
   | 'match_loss'
@@ -135,6 +151,22 @@ export interface RoomPlayer {
 }
 
 export type RoomStatus = 'waiting' | 'full' | 'playing' | 'finished';
+
+export interface BaseGameRoomOptions {
+  maxPlayers?: number;
+}
+
+export interface SnakesAndLaddersRoomOptions extends BaseGameRoomOptions {
+  exactFinish?: boolean;
+}
+
+export interface GameRoomOptionsByType
+  extends Record<Exclude<RegisteredGameId, 'snakes_and_ladders'>, BaseGameRoomOptions> {
+  snakes_and_ladders: SnakesAndLaddersRoomOptions;
+}
+
+export type CreateGameRoomOptions<K extends RegisteredGameId = 'snakes_and_ladders'> =
+  GameRoomOptionsByType[K];
 
 export interface GameRoom {
   id: string;

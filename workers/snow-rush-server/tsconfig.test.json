@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "src/**/*.ts",
+    "../../src/games/snow-rush/types.ts",
+    "../../src/games/snow-rush/constants.ts",
+    "../../src/games/snow-rush/track.ts",
+    "../../src/games/snow-rush/items.ts",
+    "../../src/games/snow-rush/simulation.ts",
+    "../../src/games/snow-rush/engine/**/*.ts",
+    "../../src/games/snow-rush/network/**/*.ts",
+    "../../src/games/registry.ts",
+    "../../src/services/roomStateHelpers.ts"
+  ],
+  "exclude": ["../../src/games/snow-rush/**/*.test.ts"]
+}

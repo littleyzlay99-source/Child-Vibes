@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { GameRoom, MatchRewardResult, RoomPlayer, RoomStatus } from '../../types';
@@ -8,7 +8,6 @@ import {
   togglePlayerReady,
   startGame,
   leaveGameRoom,
-  executeDiceRollAndMove,
   resetRoomToPlayAgain,
   handleTurnTimeout,
   updatePlayerPresence,
@@ -20,24 +19,17 @@ import {
 } from '../../services/roomService';
 import { saveActiveGameSession } from '../../services/gameSessionService';
 import { useGameShell } from '../GameShell/GameShell';
-import { GameBoard } from '../SnakesAndLadders/GameBoard';
-import { DiceRoller } from '../SnakesAndLadders/DiceRoller';
-import { VictoryModal } from '../SnakesAndLadders/VictoryModal';
-import { sounds } from '../../lib/sound';
+import { UNKNOWN_GAME_FALLBACK_TITLE } from '../../games/registry';
 import {
-  Users,
-  Copy,
-  Check,
-  Share2,
-  Play,
-  LogOut,
-  Crown,
-  ShieldCheck,
-  Clock,
-  Info,
-  WifiOff,
-  AlertTriangle,
-} from 'lucide-react';
+  GameModuleRenderer,
+  isGameModulePlayable,
+  resolveGameModule,
+  type GameModuleGameplayProps,
+  type RoomStateCommitPayload,
+} from '../../games';
+import { SharedRoomLobby } from './SharedRoomLobby';
+import { sounds } from '../../lib/sound';
+import { WifiOff } from 'lucide-react';
 
 export interface RoomMetaSummary {
   roomCode: string;
@@ -72,15 +64,13 @@ export const RoomView: React.FC<RoomViewProps> = ({
   const [loading, setLoading] = useState<boolean>(!seededRoom);
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
-  const [movingPlayerId, setMovingPlayerId] = useState<string | null>(null);
-  const [actionInProgress, setActionInProgress] = useState(false);
-  const [gameErrorNotice, setGameErrorNotice] = useState<string | null>(null);
+  const [isTogglingReady, setIsTogglingReady] = useState(false);
+  const [isStartingGame, setIsStartingGame] = useState(false);
   const [reconnectCountdown, setReconnectCountdown] = useState<number>(60);
   const [isOnline, setIsOnline] = useState<boolean>(() =>
     typeof navigator !== 'undefined' ? navigator.onLine : true
   );
 
-  const actionLockRef = useRef<boolean>(false);
   const onExitRoomRef = useRef(onExitRoom);
   const onRoomMetaChangeRef = useRef(onRoomMetaChange);
   const currentUidRef = useRef<string | undefined>(currentUser?.uid);
@@ -113,17 +103,11 @@ export const RoomView: React.FC<RoomViewProps> = ({
     if (!room) return;
     onRoomMetaChangeRef.current?.({
       roomCode: room.roomCode,
-      gameType: room.gameType || 'snakes_and_ladders',
+      gameType: room.gameType,
       status: room.status,
     });
-    if (currentUser?.uid && room.status !== 'finished') {
-      saveActiveGameSession(
-        currentUser.uid,
-        roomId,
-        room.roomCode,
-        room.gameType || 'snakes_and_ladders',
-        false
-      );
+    if (currentUser?.uid && room.status !== 'finished' && isGameModulePlayable(room.gameType)) {
+      saveActiveGameSession(currentUser.uid, roomId, room.roomCode, room.gameType, false);
     }
   }, [room?.roomCode, room?.gameType, room?.status, currentUser?.uid, roomId]);
 
@@ -370,7 +354,7 @@ export const RoomView: React.FC<RoomViewProps> = ({
   useEffect(() => {
     if (!room || !currentUser?.uid) return;
 
-    if (room.status === 'finished' && room.winnerId) {
+    if (room.status === 'finished' && room.winnerId && isGameModulePlayable(room.gameType)) {
       const roundKey = `${roomId}_r${room.gameRound || 1}_${currentUser.uid}`;
       if (claimedRoundKeyRef.current === roundKey) {
         return;
@@ -401,7 +385,42 @@ export const RoomView: React.FC<RoomViewProps> = ({
       setRewardOutcome(null);
       setIsClaimingReward(false);
     }
-  }, [room?.status, room?.winnerId, room?.gameRound, currentUser?.uid, roomId, claimRoomMatchReward]);
+  }, [
+    room?.status,
+    room?.winnerId,
+    room?.gameRound,
+    room?.gameType,
+    currentUser?.uid,
+    roomId,
+    claimRoomMatchReward,
+  ]);
+
+  // Generic post-transaction room state reconciliation callback for active Game Modules
+  const handleCommitRoomState = useCallback((payload: RoomStateCommitPayload) => {
+    setRoom((prevRoom) => {
+      const tracker = confirmedStateRef.current;
+
+      if (payload.playerSync) {
+        const { uid, position, positionVersion, lastMoveId, updatedAtMs } = payload.playerSync;
+        const existingVer = tracker.players[uid]?.positionVersion ?? 0;
+        if (positionVersion >= existingVer) {
+          tracker.players[uid] = {
+            position,
+            positionVersion,
+            lastMoveId,
+            updatedAtMs,
+          };
+        }
+      }
+
+      if (!prevRoom || (prevRoom.stateVersion || 0) >= payload.stateVersion) {
+        return prevRoom;
+      }
+
+      tracker.stateVersion = payload.stateVersion;
+      return payload.applyRoomPatch(prevRoom);
+    });
+  }, []);
 
   if (loading || !room) {
     return (
@@ -421,12 +440,14 @@ export const RoomView: React.FC<RoomViewProps> = ({
 
   const isHost = room.hostId === currentUser?.uid;
   const currentPlayer = room.players.find((p) => p.uid === currentUser?.uid);
-  const currentTurnPlayer = room.players[room.currentTurnIndex];
-  const isMyTurn = currentTurnPlayer?.uid === currentUser?.uid;
+  const moduleResolution = resolveGameModule(room.gameType);
+  const resolvedEntry = moduleResolution.registryEntry;
+  const minPlayersRequired = Math.max(2, resolvedEntry?.minPlayers ?? 2);
 
-  // Check if all non-host players are ready
+  // Check if game module is playable, minimum player count is met, and all non-host players are ready
   const canStartGame =
-    room.players.length >= 2 &&
+    moduleResolution.kind === 'resolved' &&
+    room.players.length >= minPlayersRequired &&
     room.players.every((p) => (p.uid === room.hostId ? true : p.isReady));
 
   const handleCopyCode = () => {
@@ -445,15 +466,25 @@ export const RoomView: React.FC<RoomViewProps> = ({
   };
 
   const handleToggleReady = async () => {
-    if (!currentUser || !currentPlayer) return;
+    if (!currentUser || !currentPlayer || isTogglingReady) return;
     sounds.playClick();
-    await togglePlayerReady(roomId, currentUser.uid, !currentPlayer.isReady);
+    setIsTogglingReady(true);
+    try {
+      await togglePlayerReady(roomId, currentUser.uid, !currentPlayer.isReady);
+    } finally {
+      setIsTogglingReady(false);
+    }
   };
 
   const handleStartGame = async () => {
-    if (!isHost || !canStartGame) return;
+    if (!isHost || !canStartGame || isStartingGame) return;
     sounds.playClick();
-    await startGame(roomId);
+    setIsStartingGame(true);
+    try {
+      await startGame(roomId);
+    } finally {
+      setIsStartingGame(false);
+    }
   };
 
   const handleLeaveAfterFinish = async () => {
@@ -468,111 +499,6 @@ export const RoomView: React.FC<RoomViewProps> = ({
     }
     await leaveGameRoom(roomId, currentUser.uid);
     onExitRoom();
-  };
-
-  // Roll Dice & Atomic Execution with immediate local version registration
-  const handleRollDice = async (): Promise<number | undefined> => {
-    if (
-      !currentUser ||
-      !isMyTurn ||
-      actionInProgress ||
-      actionLockRef.current ||
-      room.status !== 'playing'
-    ) {
-      return undefined;
-    }
-
-    actionLockRef.current = true;
-    setActionInProgress(true);
-    setMovingPlayerId(currentUser.uid);
-    setGameErrorNotice(null);
-
-    try {
-      const outcome = await executeDiceRollAndMove(roomId, currentUser.uid);
-
-      // Atomically synchronize confirmedStateRef + React room state so even if an unrelated
-      // snapshot arrives before the move snapshot, there is zero flicker or position rollback
-      setRoom((prevRoom) => {
-        const tracker = confirmedStateRef.current;
-        const nowMs = Date.now();
-        const existingVer = tracker.players[currentUser.uid]?.positionVersion ?? 0;
-
-        if (outcome.positionVersion >= existingVer) {
-          tracker.players[currentUser.uid] = {
-            position: outcome.newPos,
-            positionVersion: outcome.positionVersion,
-            lastMoveId: outcome.moveId,
-            updatedAtMs: nowMs,
-          };
-        }
-
-        if (!prevRoom || (prevRoom.stateVersion || 0) >= outcome.stateVersion) {
-          return prevRoom;
-        }
-
-        tracker.stateVersion = outcome.stateVersion;
-        const updatedPlayers = prevRoom.players.map((p) =>
-          p.uid === currentUser.uid
-            ? {
-                ...p,
-                position: outcome.newPos,
-                positionVersion: outcome.positionVersion,
-                lastMoveId: outcome.moveId,
-                updatedAtMs: nowMs,
-                rank: outcome.won ? 1 : p.rank,
-              }
-            : p
-        );
-
-        return {
-          ...prevRoom,
-          players: updatedPlayers,
-          playerPositions: {
-            ...(prevRoom.playerPositions || {}),
-            [currentUser.uid]: {
-              position: outcome.newPos,
-              positionVersion: outcome.positionVersion,
-              lastMoveId: outcome.moveId,
-              updatedAtMs: nowMs,
-            },
-          },
-          lastDiceRoll: outcome.diceRoll,
-          lastMoveSummary: outcome.eventSummary,
-          lastMoveId: outcome.moveId,
-          lastMoveTimestamp: outcome.turnStartTimestamp,
-          lastMovePath: outcome.movePath,
-          lastMovingPlayerUid: currentUser.uid,
-          currentTurnIndex: outcome.nextTurnIndex,
-          turnStartTimestamp: outcome.turnStartTimestamp,
-          turnDeadline: outcome.turnDeadline,
-          stateVersion: outcome.stateVersion,
-          status: outcome.won ? 'finished' : prevRoom.status,
-          winnerId: outcome.won ? currentUser.uid : prevRoom.winnerId,
-          winnerName: outcome.won
-            ? userProfile?.displayName || prevRoom.winnerName
-            : prevRoom.winnerName,
-        };
-      });
-
-      // Wait for token walk animation to complete before re-enabling
-      const animationTime = Math.max(1200, (outcome.movePath?.length || 1) * 250);
-      setTimeout(() => {
-        setMovingPlayerId(null);
-        setActionInProgress(false);
-        actionLockRef.current = false;
-      }, animationTime);
-      return outcome.diceRoll;
-    } catch (error: any) {
-      console.error('Move error:', error);
-      setGameErrorNotice(
-        error?.message || 'အံစာတုံးခေါက်ရာတွင် အဆင်မပြေဖြစ်သွားပါသည်။ ပြန်လည်ကြိုးစားပေးပါ။'
-      );
-      setMovingPlayerId(null);
-      setActionInProgress(false);
-      actionLockRef.current = false;
-      setTimeout(() => setGameErrorNotice(null), 3500);
-      return undefined;
-    }
   };
 
   const handleTurnTimeoutTrigger = async () => {
@@ -591,235 +517,79 @@ export const RoomView: React.FC<RoomViewProps> = ({
     await resetRoomToPlayAgain(roomId);
   };
 
-  // 1. WAITING / FULL LOBBY STATE (Before Host clicks Start Game)
+  // 1. WAITING / FULL LOBBY STATE (Delegated to reusable SharedRoomLobby)
   if (room.status === 'waiting' || room.status === 'full') {
     const lobbyMaxPlayers = normalizeMaxPlayers(room.maxPlayers);
-    const emptySlotCount = Math.max(0, lobbyMaxPlayers - room.players.length);
-    const isLobbyFull = room.players.length >= lobbyMaxPlayers;
+    const lobbyGameTitle = resolvedEntry?.shortTitle || UNKNOWN_GAME_FALLBACK_TITLE;
+    const lobbyRuleSummary =
+      moduleResolution.kind === 'resolved'
+        ? moduleResolution.module.getRuleSummaryMm?.(room) ?? null
+        : null;
+    const lobbyInstructions =
+      moduleResolution.kind === 'resolved'
+        ? moduleResolution.module.instructionsMm
+        : resolvedEntry?.description ?? null;
 
     return (
-      <div className="max-w-4xl mx-auto w-full p-2 sm:p-4 md:p-6 space-y-4 sm:space-y-6 text-slate-800">
-        {/* Header Bar */}
-        <div className="bg-white border border-slate-200/90 rounded-3xl p-4 sm:p-5 md:p-6 shadow-xs backdrop-blur-md">
-          <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-            <div>
-              <div className="flex items-center flex-wrap gap-2 text-xs text-slate-600 mb-1">
-                <span className="font-bold text-amber-800">မြွေနှင့်လှေကားဂိမ်း</span>
-                <span aria-hidden="true">·</span>
-                {isLobbyFull ? (
-                  <span className="font-bold text-emerald-700">
-                    လူစုံပြီ ({room.players.length}/{lobbyMaxPlayers})
-                  </span>
-                ) : (
-                  <span className="font-semibold text-sky-700">
-                    ကစားသမား စောင့်ဆိုင်းဆဲ ({room.players.length}/{lobbyMaxPlayers})
-                  </span>
-                )}
-                <span aria-hidden="true">·</span>
-                <span className="text-slate-500">
-                  {room.exactFinish ? 'အတိအကျဝင်ရန်လိုသည်' : 'သာမန်စည်းမျဉ်း'}
-                </span>
-              </div>
-              <h1 className="text-xl md:text-2xl font-black text-slate-900 flex items-center gap-2">
-                <span>အခန်းနံပါတ် -</span>
-                <span className="text-amber-700 font-mono tracking-wider">{room.roomCode}</span>
-              </h1>
-            </div>
-
-            {/* Quick Share Buttons */}
-            <div className="flex items-center gap-2 w-full md:w-auto">
-              <button
-                type="button"
-                onClick={handleCopyCode}
-                className="flex-1 md:flex-initial min-h-[44px] px-3.5 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200/80 border border-slate-200 text-slate-700 text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition cursor-pointer whitespace-nowrap"
-              >
-                {copiedCode ? <Check className="w-4 h-4 text-emerald-600 shrink-0" /> : <Copy className="w-4 h-4 shrink-0" />}
-                <span>{copiedCode ? 'ကုဒ်ကူးယူပြီး' : 'အခန်းကုဒ် ကူးမည်'}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleCopyLink}
-                className="flex-1 md:flex-initial min-h-[44px] px-3.5 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-500 text-slate-950 text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition shadow-xs cursor-pointer whitespace-nowrap"
-              >
-                {copiedLink ? <Check className="w-4 h-4 shrink-0" /> : <Share2 className="w-4 h-4 shrink-0" />}
-                <span>{copiedLink ? 'Link ကူးယူပြီး' : 'သူငယ်ချင်းဖိတ်ရန် Link'}</span>
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Players List Grid (2 columns on mobile so 4 players fit without pushing Start off-screen) */}
-        <div className="space-y-2.5 sm:space-y-3">
-          <div className="flex items-center justify-between px-1 sm:px-2">
-            <h2 className="text-sm sm:text-base font-bold text-slate-900 flex items-center gap-2">
-              <Users className="w-4 h-4 sm:w-5 sm:h-5 text-amber-600" />
-              <span className="tabular-nums">ပါဝင်သူများ ({room.players.length} / {lobbyMaxPlayers})</span>
-            </h2>
-            <div className="text-[11px] sm:text-xs text-slate-500">
-              အနည်းဆုံး ၂ ဦး လိုအပ်ပါသည်
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-4">
-            {room.players.map((player) => {
-              const isRoomHost = player.uid === room.hostId;
-              const isMe = player.uid === currentUser?.uid;
-
-              return (
-                <div
-                  key={player.uid}
-                  className={`relative bg-white border rounded-2xl p-3 sm:p-4 flex flex-col items-center text-center transition-all duration-200 shadow-xs ${
-                    player.isReady
-                      ? 'border-emerald-400 bg-emerald-50/20'
-                      : 'border-slate-200'
-                  }`}
-                >
-                  {/* Host Indicator */}
-                  {isRoomHost && (
-                    <div className="absolute top-2.5 left-2.5 flex items-center gap-1 bg-amber-400 text-slate-950 px-1.5 py-0.5 rounded-md text-[9px] sm:text-[10px] font-black">
-                      <Crown className="w-2.5 h-2.5 sm:w-3 sm:h-3 fill-current" />
-                      <span>HOST</span>
-                    </div>
-                  )}
-
-                  {/* Player Color Indicator */}
-                  <div
-                    className="absolute top-2.5 right-2.5 w-3 h-3 rounded-full border border-white shadow-xs"
-                    style={{ backgroundColor: player.color }}
-                    title="ကစားသမားအရောင်"
-                  />
-
-                  {/* Avatar */}
-                  <div className="w-12 h-12 sm:w-16 sm:h-16 rounded-full overflow-hidden border-2 border-slate-200 mb-2 sm:mb-3 mt-3 sm:mt-2 shadow-inner bg-slate-100">
-                    <img
-                      src={player.photoURL || `https://api.dicebear.com/7.x/bottts/svg?seed=${player.uid}`}
-                      alt={player.displayName}
-                      referrerPolicy="no-referrer"
-                      className="w-full h-full object-cover"
-                    />
-                  </div>
-
-                  {/* Name & Player ID */}
-                  <div className="font-bold text-slate-900 text-xs sm:text-sm truncate max-w-full px-1">
-                    {player.displayName} {isMe && '(သင်)'}
-                  </div>
-                  <div className="text-[11px] font-mono text-amber-800 font-semibold mb-2 sm:mb-3">
-                    {player.playerId}
-                  </div>
-
-                  {/* Ready Status */}
-                  <div
-                    className={`px-2.5 py-1 rounded-lg text-[11px] sm:text-xs font-bold flex items-center gap-1 whitespace-nowrap ${
-                      player.isReady
-                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                        : 'bg-slate-100 text-slate-500 border border-slate-200'
-                    }`}
-                  >
-                    {player.isReady ? (
-                      <>
-                        <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                        <span>အဆင်သင့်ဖြစ်ပြီ</span>
-                      </>
-                    ) : (
-                      <>
-                        <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                        <span>စောင့်ဆိုင်းဆဲ</span>
-                      </>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-
-            {/* Empty Slots */}
-            {Array.from({ length: emptySlotCount }).map((_, i) => (
-              <div
-                key={`empty-${i}`}
-                className="border-2 border-dashed border-slate-200/90 rounded-2xl p-4 sm:p-6 flex flex-col items-center justify-center text-center text-slate-400 bg-slate-50/50 min-h-[148px] sm:min-h-[170px]"
-              >
-                <Users className="w-6 h-6 sm:w-8 sm:h-8 opacity-40 mb-1.5 sm:mb-2" />
-                <span className="text-[11px] sm:text-xs font-semibold">ကစားသမား စောင့်ဆိုင်းဆဲ</span>
-                <span className="text-[10px] sm:text-[11px] text-slate-400 mt-0.5">ကုဒ်မျှဝေပြီး ဖိတ်ခေါ်ပါ</span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Lobby Controls */}
-        <div className="bg-white border border-slate-200/90 rounded-3xl p-4 sm:p-5 flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-4 shadow-xs">
-          <button
-            type="button"
-            onClick={requestExit}
-            className="w-full sm:w-auto min-h-[46px] px-5 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-sm flex items-center justify-center gap-2 transition cursor-pointer border border-slate-200 whitespace-nowrap"
-          >
-            <LogOut className="w-4 h-4" />
-            <span>အခန်းမှ ထွက်မည်</span>
-          </button>
-
-          <div className="flex items-center gap-3 w-full sm:w-auto">
-            {/* Non-host Ready Toggle */}
-            {!isHost && (
-              <button
-                type="button"
-                onClick={handleToggleReady}
-                className={`w-full sm:w-auto min-h-[48px] px-6 py-3.5 rounded-xl font-black text-sm flex items-center justify-center gap-2 transition shadow-xs cursor-pointer ${
-                  currentPlayer?.isReady
-                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                    : 'bg-amber-400 hover:bg-amber-500 text-slate-950'
-                }`}
-              >
-                <ShieldCheck className="w-5 h-5 shrink-0" />
-                <span>
-                  {currentPlayer?.isReady ? 'အဆင်သင့်ဖြစ်ပြီးပါပြီ (ပယ်ဖျက်ရန်)' : 'အဆင်သင့်ဖြစ်ပြီ'}
-                </span>
-              </button>
-            )}
-
-            {/* Host Start Game Button */}
-            {isHost && (
-              <button
-                type="button"
-                onClick={handleStartGame}
-                disabled={!canStartGame}
-                className={`w-full sm:w-auto min-h-[48px] px-7 py-3.5 rounded-xl font-black text-sm md:text-base flex items-center justify-center gap-2 transition shadow-xs ${
-                  canStartGame
-                    ? 'bg-amber-400 hover:bg-amber-500 text-slate-950 cursor-pointer active:scale-[0.98]'
-                    : 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200'
-                }`}
-              >
-                <Play className="w-5 h-5 fill-current shrink-0" />
-                <span>
-                  {room.players.length < 2
-                    ? 'ကစားသမား အနည်းဆုံး ၂ ဦး လိုအပ်ပါသည်'
-                    : canStartGame
-                    ? 'ဂိမ်းစတင်မည်'
-                    : 'အားလုံး အဆင်သင့်ဖြစ်ရန် စောင့်ဆိုင်းပါ'}
-                </span>
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Quick Instructions */}
-        <div className="bg-amber-50/70 border border-amber-200/80 rounded-2xl p-3.5 sm:p-4 flex items-start gap-3 text-xs text-slate-700">
-          <Info className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-          <div>
-            <span className="font-bold text-slate-900">ဂိမ်းကစားနည်း အကျဉ်းချုပ် - </span>
-            အလှည့်ကျ အံစာတုံးခေါက်ပြီး ၁ မှ ၁၀၀ သို့ ရွေ့ရမည်။ လှေကားတွေ့ပါက အပေါ်သို့ တက်နိုင်ပြီး မြွေတွေ့ပါက
-            အောက်သို့ ပြန်ဆင်းရမည်။ နံပါတ် ၁၀၀ သို့ ပထမဆုံးရောက်ရှိသူသည် ချန်ပီယံဆုနှင့် ရွှေဒင်္ဂါး ရရှိမည်ဖြစ်ပါသည်။
-          </div>
-        </div>
-      </div>
+      <SharedRoomLobby
+        roomCode={room.roomCode}
+        roomStatus={room.status}
+        gameTitle={lobbyGameTitle}
+        gameIcon={resolvedEntry?.icon}
+        ruleSummary={lobbyRuleSummary}
+        instructionsText={lobbyInstructions}
+        hostId={room.hostId}
+        hostName={room.hostName}
+        currentUserId={currentUser?.uid ?? null}
+        players={room.players}
+        minPlayers={minPlayersRequired}
+        maxPlayers={lobbyMaxPlayers}
+        isHost={isHost}
+        canStartGame={canStartGame}
+        isOnline={isOnline}
+        isTogglingReady={isTogglingReady}
+        isStartingGame={isStartingGame}
+        isExiting={isExiting}
+        copiedCode={copiedCode}
+        copiedLink={copiedLink}
+        onCopyCode={handleCopyCode}
+        onCopyLink={handleCopyLink}
+        onToggleReady={handleToggleReady}
+        onStartGame={handleStartGame}
+        onLeaveRoom={requestExit}
+      />
     );
   }
 
-  // 2. ACTIVE GAMEPLAY & VICTORY STATE (Inside Dedicated Game Mode Shell)
-  const winningPlayer = room.winnerId ? room.players.find((p) => p.uid === room.winnerId) : undefined;
+  // 2. ACTIVE GAMEPLAY & VICTORY STATE (Delegated to Game Module Router inside GameShell)
+  const gameplayProps: GameModuleGameplayProps = {
+    room,
+    currentUserId: currentUser?.uid ?? null,
+    currentUserDisplayName: userProfile?.displayName ?? null,
+    currentPlayer,
+    isHost,
+    isOnline,
+    reconnectCountdown,
+    cosmetics: {
+      activeBoardSkin: userProfile?.activeBoardSkin || 'board_classic',
+      activeDiceSkin: userProfile?.activeDiceSkin || 'dice_classic',
+      activeTokenSkin: userProfile?.activeTokenSkin || 'token_crown',
+      activeFrame: userProfile?.activeFrame || 'frame_gold',
+    },
+    rewardOutcome,
+    fallbackProgress: deriveLevelProgress(userProfile?.totalXp ?? 0),
+    isClaimingReward,
+    isExiting,
+    onCommitRoomState: handleCommitRoomState,
+    onTurnTimeout: handleTurnTimeoutTrigger,
+    onPlayAgain: handlePlayAgain,
+    onRequestExit: requestExit,
+    onLeaveAfterFinish: handleLeaveAfterFinish,
+  };
 
   return (
     <div className="max-w-5xl mx-auto w-full space-y-2 sm:space-y-3 text-slate-800">
-      {/* Local Offline Notice if current device lost internet */}
+      {/* Shared Local Offline Notice if current device lost internet */}
       {!isOnline && (
         <div className="p-2.5 sm:p-3 bg-amber-50 border border-amber-300 rounded-2xl flex items-center gap-2 text-xs font-bold text-amber-950">
           <WifiOff className="w-4 h-4 text-rose-600 shrink-0" />
@@ -829,8 +599,8 @@ export const RoomView: React.FC<RoomViewProps> = ({
         </div>
       )}
 
-      {/* Disconnection Grace Period Notice (60 Seconds) */}
-      {room.disconnectedPlayerId && (
+      {/* Shared Disconnection Grace Period Notice (60 Seconds) */}
+      {moduleResolution.kind === 'resolved' && room.disconnectedPlayerId && (
         <div className="p-2.5 sm:p-3 bg-amber-100 border border-amber-400 rounded-2xl flex items-center justify-between gap-2 text-xs font-bold text-amber-950 shadow-xs">
           <div className="flex items-center gap-2 min-w-0">
             <WifiOff className="w-4 h-4 text-rose-600 shrink-0" />
@@ -845,90 +615,8 @@ export const RoomView: React.FC<RoomViewProps> = ({
         </div>
       )}
 
-      {/* Error notification banner */}
-      {gameErrorNotice && (
-        <div className="p-2.5 sm:p-3 bg-rose-50 border border-rose-300 rounded-xl text-xs font-semibold text-rose-800 flex items-center gap-2">
-          <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
-          <span>{gameErrorNotice}</span>
-        </div>
-      )}
-
-      {/* Compact Live Players & Tile Position Strip (Exit button lives solely in GameShell Top Bar) */}
-      <div className="bg-white border border-slate-200/90 rounded-2xl px-3 py-2 flex items-center justify-between gap-2 shadow-xs backdrop-blur-md">
-        <span className="text-xs font-bold text-slate-600 hidden sm:inline whitespace-nowrap shrink-0">
-          ကစားသမားများ
-        </span>
-
-        <div className="flex items-center gap-1.5 sm:gap-2 overflow-x-auto w-full sm:w-auto py-0.5 scrollbar-none">
-          {room.players.map((p, idx) => {
-            const isCurrentTurn = idx === room.currentTurnIndex && room.status === 'playing';
-            return (
-              <div
-                key={p.uid}
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-bold border transition whitespace-nowrap shrink-0 ${
-                  isCurrentTurn
-                    ? 'border-amber-400 bg-amber-100 text-amber-950 shadow-xs ring-2 ring-amber-300/40'
-                    : 'border-slate-200 bg-slate-50 text-slate-700'
-                }`}
-              >
-                <span
-                  className="w-2.5 h-2.5 rounded-full shrink-0"
-                  style={{ backgroundColor: p.color }}
-                />
-                <span className="truncate max-w-[78px] sm:max-w-[110px]">{p.displayName}</span>
-                <span className="text-amber-800 font-mono tabular-nums text-[11px]">
-                  #{p.position}
-                </span>
-                {p.isConnected === false && (
-                  <span title="Offline">
-                    <WifiOff className="w-3 h-3 text-rose-600 shrink-0" />
-                  </span>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Main Board View with Version-Protected Step Animation */}
-      <GameBoard
-        players={room.players}
-        currentTurnIndex={room.currentTurnIndex}
-        boardSkin={userProfile?.activeBoardSkin || 'board_classic'}
-        movingPlayerId={movingPlayerId}
-        gameRound={room.gameRound || 1}
-        lastMoveId={room.lastMoveId}
-        lastMovePath={room.lastMovePath}
-        lastMoveTimestamp={room.lastMoveTimestamp}
-        lastMovingPlayerUid={room.lastMovingPlayerUid}
-      />
-
-      {/* Turn & Dice Action Controller with 30s Countdown */}
-      <DiceRoller
-        isMyTurn={isMyTurn}
-        currentTurnPlayer={currentTurnPlayer}
-        lastDiceRoll={room.lastDiceRoll}
-        lastMoveSummary={room.lastMoveSummary}
-        onRollDice={handleRollDice}
-        disabled={actionInProgress || room.status === 'finished'}
-        diceSkin={userProfile?.activeDiceSkin || 'dice_classic'}
-        turnDeadline={room.turnDeadline}
-        onTimeout={handleTurnTimeoutTrigger}
-      />
-
-      {/* Victory Celebration Modal */}
-      {room.status === 'finished' && (
-        <VictoryModal
-          winner={winningPlayer}
-          isHost={isHost}
-          isCurrentUserWinner={room.winnerId === currentUser?.uid}
-          rewardResult={rewardOutcome}
-          fallbackProgress={deriveLevelProgress(userProfile?.totalXp ?? 0)}
-          isClaimingReward={isClaimingReward}
-          onPlayAgain={handlePlayAgain}
-          onLeaveRoom={handleLeaveAfterFinish}
-        />
-      )}
+      {/* Delegated Mini-Game Gameplay Surface or Safe Burmese Fallback UI */}
+      <GameModuleRenderer resolution={moduleResolution} gameplayProps={gameplayProps} />
     </div>
   );
 };

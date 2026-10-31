@@ -26,6 +26,7 @@ import {
   saveActiveGameSession,
   verifyAndRecoverGameSession,
 } from './services/gameSessionService';
+import { isGameModulePlayable } from './games';
 import { GameRoom } from './types';
 
 function MainApp() {
@@ -47,7 +48,7 @@ function MainApp() {
       if (room) {
         setActiveRoomMeta({
           roomCode: room.roomCode,
-          gameType: room.gameType || 'snakes_and_ladders',
+          gameType: room.gameType ?? '',
           status: room.status,
         });
       } else {
@@ -55,7 +56,7 @@ function MainApp() {
       }
       setActiveRoomId(roomId);
 
-      if (currentUser?.uid) {
+      if (currentUser?.uid && (!room || isGameModulePlayable(room.gameType))) {
         saveActiveGameSession(
           currentUser.uid,
           roomId,
@@ -191,7 +192,7 @@ function MainApp() {
         setInitialRoomData(outcome.room);
         setActiveRoomMeta({
           roomCode: outcome.room.roomCode,
-          gameType: outcome.room.gameType || 'snakes_and_ladders',
+          gameType: outcome.room.gameType ?? '',
           status: outcome.room.status,
         });
         setActiveRoomId(outcome.roomId);
@@ -223,21 +224,15 @@ function MainApp() {
     };
   }, [loading, currentUser, userProfile, handleEnterRoom]);
 
-  // Shared Mini-Game Surface Router (reusable for future mini-games inside GameShell)
-  const renderActiveMiniGame = (roomId: string, gameType?: string) => {
-    switch (gameType) {
-      case 'snakes_and_ladders':
-      default:
-        return (
-          <RoomView
-            roomId={roomId}
-            initialRoom={initialRoomData}
-            onExitRoom={handleRoomClosedOrExited}
-            onRoomMetaChange={handleRoomMetaChange}
-          />
-        );
-    }
-  };
+  // Shared Mini-Game Room Controller inside GameShell (delegates gameplay via GameModuleRenderer)
+  const renderActiveMiniGame = (roomId: string) => (
+    <RoomView
+      roomId={roomId}
+      initialRoom={initialRoomData}
+      onExitRoom={handleRoomClosedOrExited}
+      onRoomMetaChange={handleRoomMetaChange}
+    />
+  );
 
   if (loading || (currentUser && userProfile && isRecoveringSession)) {
     return (
@@ -260,8 +255,11 @@ function MainApp() {
 
   // DEDICATED GAME MODE: Hide Main Header & Bottom Navigation Bar completely while in an active room
   if (activeRoomId) {
-    const effectiveGameType =
-      activeRoomMeta?.gameType || initialRoomData?.gameType || 'snakes_and_ladders';
+    const effectiveGameType = activeRoomMeta
+      ? activeRoomMeta.gameType
+      : initialRoomData
+      ? (initialRoomData.gameType ?? '')
+      : undefined;
     const effectiveRoomCode =
       activeRoomMeta?.roomCode ||
       initialRoomData?.roomCode ||
@@ -276,7 +274,7 @@ function MainApp() {
         gameStatus={effectiveStatus}
         onConfirmExit={handleConfirmGameExit}
       >
-        {renderActiveMiniGame(activeRoomId, effectiveGameType)}
+        {renderActiveMiniGame(activeRoomId)}
       </GameShell>
     );
   }
@@ -365,13 +363,7 @@ function MainApp() {
             />
           )}
 
-          {currentTab === 'games' && (
-            <GamesListView
-              onPlaySnakesAndLadders={() => {
-                setCurrentTab('home');
-              }}
-            />
-          )}
+          {currentTab === 'games' && <GamesListView onEnterRoom={handleEnterRoom} />}
 
           {currentTab === 'rooms' && <RoomsBrowseView onEnterRoom={handleEnterRoom} />}
 
@@ -391,7 +383,91 @@ function MainApp() {
   );
 }
 
+let LazySnowRushDevPreview: React.LazyExoticComponent<
+  React.ComponentType<{ onExitPreview?: () => void }>
+> | null = null;
+
+if (import.meta.env.DEV) {
+  LazySnowRushDevPreview = React.lazy(() => import('./games/snow-rush/SnowRushDevPreview'));
+}
+
+const LazySnowRushPrivateTestView = React.lazy(
+  () => import('./games/snow-rush/SnowRushPrivateTestView')
+);
+
 export default function App() {
+  const [showDevSnowRush, setShowDevSnowRush] = useState<boolean>(() => {
+    if (import.meta.env.DEV && typeof window !== 'undefined') {
+      return new URLSearchParams(window.location.search).get('devSnowRush') === '1';
+    }
+    return false;
+  });
+
+  const [showPrivateSnowRush, setShowPrivateSnowRush] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return new URLSearchParams(window.location.search).get('privateSnowRush') === '1';
+    }
+    return false;
+  });
+
+  if (import.meta.env.DEV && showDevSnowRush && LazySnowRushDevPreview) {
+    const DevPreviewComponent = LazySnowRushDevPreview;
+    return (
+      <React.Suspense
+        fallback={
+          <div className="min-h-[100dvh] bg-slate-950 text-slate-100 flex items-center justify-center text-sm font-bold">
+            Snow Rush Local Dev Preview ဖွင့်လှစ်နေပါသည်...
+          </div>
+        }
+      >
+        <DevPreviewComponent
+          onExitPreview={() => {
+            if (typeof window !== 'undefined') {
+              const params = new URLSearchParams(window.location.search);
+              params.delete('devSnowRush');
+              const nextQuery = params.toString();
+              const nextUrl = nextQuery
+                ? `${window.location.pathname}?${nextQuery}`
+                : window.location.pathname;
+              window.history.replaceState({}, document.title, nextUrl);
+            }
+            setShowDevSnowRush(false);
+          }}
+        />
+      </React.Suspense>
+    );
+  }
+
+  if (showPrivateSnowRush) {
+    return (
+      <AuthProvider>
+        <React.Suspense
+          fallback={
+            <div className="min-h-[100dvh] bg-slate-950 text-slate-100 flex items-center justify-center text-sm font-bold">
+              Snow Rush Private Multiplayer Test ဖွင့်လှစ်နေပါသည်...
+            </div>
+          }
+        >
+          <LazySnowRushPrivateTestView
+            onExitPrivateTest={() => {
+              if (typeof window !== 'undefined') {
+                const params = new URLSearchParams(window.location.search);
+                params.delete('privateSnowRush');
+                params.delete('room');
+                const nextQuery = params.toString();
+                const nextUrl = nextQuery
+                  ? `${window.location.pathname}?${nextQuery}`
+                  : window.location.pathname;
+                window.history.replaceState({}, document.title, nextUrl);
+              }
+              setShowPrivateSnowRush(false);
+            }}
+          />
+        </React.Suspense>
+      </AuthProvider>
+    );
+  }
+
   return (
     <AuthProvider>
       <MainApp />
