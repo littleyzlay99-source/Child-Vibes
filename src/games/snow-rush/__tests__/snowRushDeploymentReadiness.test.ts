@@ -1,5 +1,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { loadEnv } from 'vite';
 import { getAvailableGames, getGameById } from '../../registry';
 import { isGameModulePlayable, resolveGameModule } from '../../moduleResolver';
 import { resolveCreateGameRoomInput } from '../../../services/roomService';
@@ -18,6 +21,7 @@ import {
   resolveSnowRushWorkerHealthUrl,
   resolveSnowRushWorkerWsUrl,
 } from '../network/protocol';
+import { SnowRushPrivateTestViewContent } from '../SnowRushPrivateTestView';
 import {
   buildPrivateSnowRushRoomPayload,
   checkSnowRushWorkerHealth,
@@ -516,8 +520,131 @@ async function runStep49ReadinessSuite(): Promise<void> {
     passed += 1;
   }
 
+  // 7. Production `.env.production` + `.gitignore` + Private Test UI Configured State Verification
+  {
+    const EXPECTED_PROD_WORKER_URL =
+      'https://child-vibes-snow-rush-server.littleyzlay99.workers.dev';
+
+    const gitignoreRaw = fs.readFileSync(path.join(WORKSPACE_ROOT, '.gitignore'), 'utf8');
+    const gitignoreLines = gitignoreRaw
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0 && !l.startsWith('#'));
+    const envWildcardIdx = gitignoreLines.indexOf('.env*');
+    const unignoreProdIdx = gitignoreLines.indexOf('!.env.production');
+    assert(
+      envWildcardIdx >= 0 && unignoreProdIdx > envWildcardIdx,
+      '.gitignore must include !.env.production AFTER .env* so GitHub Push includes .env.production'
+    );
+
+    const envProdPath = path.join(WORKSPACE_ROOT, '.env.production');
+    assert(fs.existsSync(envProdPath), 'Repository root .env.production must exist');
+    const envProdLines = fs
+      .readFileSync(envProdPath, 'utf8')
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0 && !l.startsWith('#'));
+    assert(
+      envProdLines.length === 1 &&
+        envProdLines[0] === `VITE_SNOW_RUSH_WS_URL=${EXPECTED_PROD_WORKER_URL}`,
+      '.env.production must contain ONLY VITE_SNOW_RUSH_WS_URL for the public Worker endpoint (zero secrets or extra vars)'
+    );
+
+    // Simulate Cloudflare Pages `Build environment variables: (none found)` by clearing process.env.VITE_SNOW_RUSH_WS_URL
+    const savedEnvVal = process.env.VITE_SNOW_RUSH_WS_URL;
+    delete process.env.VITE_SNOW_RUSH_WS_URL;
+    let loadedProdEnv: Record<string, string>;
+    try {
+      loadedProdEnv = loadEnv('production', WORKSPACE_ROOT, 'VITE_');
+    } finally {
+      if (savedEnvVal !== undefined) {
+        process.env.VITE_SNOW_RUSH_WS_URL = savedEnvVal;
+      }
+    }
+
+    assert(
+      loadedProdEnv.VITE_SNOW_RUSH_WS_URL === EXPECTED_PROD_WORKER_URL,
+      'Vite loadEnv("production") must resolve VITE_SNOW_RUSH_WS_URL from .env.production even when process.env is empty'
+    );
+    assert(
+      resolveSnowRushWorkerHealthUrl(loadedProdEnv.VITE_SNOW_RUSH_WS_URL) ===
+        `${EXPECTED_PROD_WORKER_URL}/health`,
+      'Production Worker URL must resolve cleanly to /health endpoint'
+    );
+    assert(
+      resolveSnowRushWorkerWsUrl('room_SR2026', loadedProdEnv.VITE_SNOW_RUSH_WS_URL) ===
+        'wss://child-vibes-snow-rush-server.littleyzlay99.workers.dev/ws/snow-rush/room_SR2026',
+      'Production Worker URL must resolve cleanly to wss://.../ws/snow-rush/:roomId'
+    );
+
+    // Code-level Private Test UI rendering verification (Configured vs Unconfigured)
+    const mockTesterProfile: UserProfile = {
+      id: 'uid_tester_prod',
+      playerId: 'CV900001',
+      displayName: 'Snow Tester',
+      email: 'tester@example.com',
+      photoURL: '',
+      level: 2,
+      xp: 200,
+      totalXp: 200,
+      points: 100,
+      totalWins: 2,
+      totalGames: 5,
+      activeBoardSkin: 'board_classic',
+      activeDiceSkin: 'dice_classic',
+      activeTokenSkin: 'token_crown',
+      activeFrame: 'frame_gold',
+      inventory: [],
+      createdAt: '2026-04-08T00:00:00.000Z',
+      updatedAt: '2026-04-08T00:00:00.000Z',
+    };
+
+    const configuredHtml = renderToStaticMarkup(
+      React.createElement(SnowRushPrivateTestViewContent, {
+        currentUserUid: mockTesterProfile.id,
+        userProfile: mockTesterProfile,
+        loading: false,
+        workerBaseUrlOverride: loadedProdEnv.VITE_SNOW_RUSH_WS_URL,
+      })
+    );
+
+    assert(
+      configuredHtml.includes(`VITE_SNOW_RUSH_WS_URL သတ်မှတ်ထားပြီး (${EXPECTED_PROD_WORKER_URL})`),
+      'Configured Private Test UI must display active Worker host label'
+    );
+    assert(
+      !configuredHtml.includes('VITE_SNOW_RUSH_WS_URL အလွတ်ဖြစ်နေပါသည်') &&
+        !configuredHtml.includes('Multiplayer Server မသတ်မှတ်ရသေးပါ (Unconfigured)'),
+      'Configured Private Test UI must NOT display Server unconfigured warnings'
+    );
+    assert(
+      !configuredHtml.includes('disabled=""') ||
+        (configuredHtml.includes('>Worker /health စမ်းသပ်မည်</button>') &&
+          !configuredHtml.includes('disabled="" class="min-h-[40px]') &&
+          !configuredHtml.includes('disabled="" class="w-full min-h-[44px] py-2.5 rounded-xl bg-amber-400')),
+      'Configured Private Test UI must enable Health Check and Create Private Room buttons'
+    );
+
+    // Verify unconfigured fallback still renders warning when explicitly empty
+    const unconfiguredHtml = renderToStaticMarkup(
+      React.createElement(SnowRushPrivateTestViewContent, {
+        currentUserUid: mockTesterProfile.id,
+        userProfile: mockTesterProfile,
+        loading: false,
+        workerBaseUrlOverride: '',
+      })
+    );
+    assert(
+      unconfiguredHtml.includes('VITE_SNOW_RUSH_WS_URL အလွတ်ဖြစ်နေပါသည်') &&
+        unconfiguredHtml.includes('Multiplayer Server မသတ်မှတ်ရသေးပါ (Unconfigured)'),
+      'Explicitly empty override must still render unconfigured warning safely'
+    );
+
+    passed += 1;
+  }
+
   console.log(
-    `[SnowRush Step 4.9 Deployment Readiness Suite] ALL ${passed}/6 TEST GROUPS PASSED!`
+    `[SnowRush Step 4.9 Deployment Readiness Suite] ALL ${passed}/7 TEST GROUPS PASSED!`
   );
 }
 

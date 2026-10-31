@@ -18,7 +18,7 @@ import { db } from '../../lib/firebase';
 import { sounds } from '../../lib/sound';
 import { deriveLevelProgress } from '../../services/progressionService';
 import { deduplicateRoomPlayers, normalizeMaxPlayers } from '../../services/roomStateHelpers';
-import type { GameRoom, MatchRewardResult } from '../../types';
+import type { GameRoom, MatchRewardResult, UserProfile } from '../../types';
 import { getGameById } from '../registry';
 import type { RoomStateCommitPayload } from '../types';
 import { resolveSnowRushWorkerHealthUrl } from './network/protocol';
@@ -37,6 +37,13 @@ import { SnowRushMultiplayerView } from './SnowRushMultiplayerView';
 
 export interface SnowRushPrivateTestViewProps {
   readonly onExitPrivateTest?: () => void;
+  readonly workerBaseUrlOverride?: string | null;
+}
+
+export interface SnowRushPrivateTestViewContentProps extends SnowRushPrivateTestViewProps {
+  readonly currentUserUid: string | null;
+  readonly userProfile: UserProfile | null;
+  readonly loading: boolean;
 }
 
 const NOOP_COMMIT_ROOM_STATE = (_payload: RoomStateCommitPayload): void => {
@@ -57,10 +64,13 @@ const NOOP_ASYNC = async (): Promise<void> => {
  * - Blocks room creation when `VITE_SNOW_RUSH_WS_URL` is unconfigured so Firestore stays clean.
  * - Never calls `claimMatchReward()` and never writes `winnerId`, `status: 'finished'`, XP, or Points.
  */
-export const SnowRushPrivateTestView: React.FC<SnowRushPrivateTestViewProps> = ({
+export const SnowRushPrivateTestViewContent: React.FC<SnowRushPrivateTestViewContentProps> = ({
   onExitPrivateTest,
+  workerBaseUrlOverride,
+  currentUserUid,
+  userProfile,
+  loading,
 }) => {
-  const { currentUser, userProfile, loading } = useAuth();
   const registryEntry = getGameById('snow_rush');
 
   const initialUrlRoomCode = useMemo(() => {
@@ -69,7 +79,10 @@ export const SnowRushPrivateTestView: React.FC<SnowRushPrivateTestViewProps> = (
     return raw.replace(/^#/, '').trim().toUpperCase().slice(0, 8);
   }, []);
 
-  const configuredHealthUrl = useMemo(() => resolveSnowRushWorkerHealthUrl(), []);
+  const configuredHealthUrl = useMemo(
+    () => resolveSnowRushWorkerHealthUrl(workerBaseUrlOverride),
+    [workerBaseUrlOverride]
+  );
   const isWsConfigured = configuredHealthUrl !== null;
 
   const configuredWorkerHostLabel = useMemo(() => {
@@ -116,7 +129,7 @@ export const SnowRushPrivateTestView: React.FC<SnowRushPrivateTestViewProps> = (
 
   // Subscribe to the active Private Test Room ONLY after explicit Create / Join
   useEffect(() => {
-    if (!activeRoomId || !currentUser?.uid) {
+    if (!activeRoomId || !currentUserUid) {
       return;
     }
 
@@ -140,7 +153,7 @@ export const SnowRushPrivateTestView: React.FC<SnowRushPrivateTestViewProps> = (
         const data = snap.data() as GameRoom;
         const uniquePlayers = deduplicateRoomPlayers(data.players, data.playerPositions);
         const maxCap = normalizeMaxPlayers(data.maxPlayers);
-        const stillMember = uniquePlayers.some((p) => p.uid === currentUser.uid);
+        const stillMember = uniquePlayers.some((p) => p.uid === currentUserUid);
 
         if (!stillMember && !snap.metadata.fromCache) {
           setActiveRoomId(null);
@@ -177,19 +190,19 @@ export const SnowRushPrivateTestView: React.FC<SnowRushPrivateTestViewProps> = (
       subscribed = false;
       unsubscribe();
     };
-  }, [activeRoomId, currentUser?.uid]);
+  }, [activeRoomId, currentUserUid]);
 
   const handleRunHealthCheck = useCallback(async () => {
     if (healthLoading) return;
     sounds.playClick();
     setHealthLoading(true);
     try {
-      const res = await checkSnowRushWorkerHealth();
+      const res = await checkSnowRushWorkerHealth(workerBaseUrlOverride);
       setHealthResult(res);
     } finally {
       setHealthLoading(false);
     }
-  }, [healthLoading]);
+  }, [healthLoading, workerBaseUrlOverride]);
 
   const handleCreatePrivateRoom = async () => {
     if (!userProfile || !isWsConfigured || isBusy) return;
@@ -234,7 +247,7 @@ export const SnowRushPrivateTestView: React.FC<SnowRushPrivateTestViewProps> = (
   };
 
   const handleLeaveCurrentRoom = useCallback(async () => {
-    const uid = currentUser?.uid;
+    const uid = currentUserUid;
     const roomToLeave = activeRoomId;
     if (!uid || !roomToLeave || isExitingRoom) {
       setActiveRoomId(null);
@@ -254,10 +267,10 @@ export const SnowRushPrivateTestView: React.FC<SnowRushPrivateTestViewProps> = (
       setActiveRoomId(null);
       setIsExitingRoom(false);
     }
-  }, [activeRoomId, currentUser?.uid, isExitingRoom]);
+  }, [activeRoomId, currentUserUid, isExitingRoom]);
 
   const handleExitBackToPlatform = async () => {
-    if (activeRoomId && currentUser?.uid) {
+    if (activeRoomId && currentUserUid) {
       await handleLeaveCurrentRoom();
     }
     if (onExitPrivateTest) {
@@ -278,13 +291,13 @@ export const SnowRushPrivateTestView: React.FC<SnowRushPrivateTestViewProps> = (
     );
   }
 
-  if (!currentUser || !userProfile) {
+  if (!currentUserUid || !userProfile) {
     return <LoginScreen />;
   }
 
   // Active Race Surface (`status === 'playing'`)
   if (activeRoomId && room && room.status === 'playing') {
-    const currentPlayer = room.players.find((p) => p.uid === currentUser.uid);
+    const currentPlayer = room.players.find((p) => p.uid === currentUserUid);
     const nullReward: MatchRewardResult | null = null;
 
     return (
@@ -316,10 +329,10 @@ export const SnowRushPrivateTestView: React.FC<SnowRushPrivateTestViewProps> = (
 
         <SnowRushMultiplayerView
           room={room}
-          currentUserId={currentUser.uid}
+          currentUserId={currentUserUid}
           currentUserDisplayName={userProfile.displayName}
           currentPlayer={currentPlayer}
-          isHost={room.hostId === currentUser.uid}
+          isHost={room.hostId === currentUserUid}
           isOnline={isOnline}
           reconnectCountdown={60}
           cosmetics={{
@@ -332,6 +345,7 @@ export const SnowRushPrivateTestView: React.FC<SnowRushPrivateTestViewProps> = (
           fallbackProgress={deriveLevelProgress(userProfile.totalXp ?? 0)}
           isClaimingReward={false}
           isExiting={isExitingRoom}
+          workerBaseUrlOverride={workerBaseUrlOverride}
           onCommitRoomState={NOOP_COMMIT_ROOM_STATE}
           onTurnTimeout={NOOP_ASYNC}
           onPlayAgain={NOOP_ASYNC}
@@ -357,8 +371,8 @@ export const SnowRushPrivateTestView: React.FC<SnowRushPrivateTestViewProps> = (
       );
     }
 
-    const isHost = room.hostId === currentUser.uid;
-    const currentPlayer = room.players.find((p) => p.uid === currentUser.uid);
+    const isHost = room.hostId === currentUserUid;
+    const currentPlayer = room.players.find((p) => p.uid === currentUserUid);
     const canStart =
       isWsConfigured &&
       room.players.length >= 2 &&
@@ -385,7 +399,7 @@ export const SnowRushPrivateTestView: React.FC<SnowRushPrivateTestViewProps> = (
       sounds.playClick();
       setIsBusy(true);
       try {
-        await togglePrivateSnowRushReady(activeRoomId, currentUser.uid, !currentPlayer.isReady);
+        await togglePrivateSnowRushReady(activeRoomId, currentUserUid, !currentPlayer.isReady);
       } finally {
         setIsBusy(false);
       }
@@ -396,7 +410,7 @@ export const SnowRushPrivateTestView: React.FC<SnowRushPrivateTestViewProps> = (
       sounds.playClick();
       setIsBusy(true);
       try {
-        await startPrivateSnowRushRace(activeRoomId, currentUser.uid);
+        await startPrivateSnowRushRace(activeRoomId, currentUserUid);
       } finally {
         setIsBusy(false);
       }
@@ -439,7 +453,7 @@ export const SnowRushPrivateTestView: React.FC<SnowRushPrivateTestViewProps> = (
           instructionsText={snowRushModule.instructionsMm}
           hostId={room.hostId}
           hostName={room.hostName}
-          currentUserId={currentUser.uid}
+          currentUserId={currentUserUid}
           players={room.players}
           minPlayers={2}
           maxPlayers={normalizeMaxPlayers(room.maxPlayers)}
@@ -678,6 +692,22 @@ export const SnowRushPrivateTestView: React.FC<SnowRushPrivateTestViewProps> = (
         </div>
       </div>
     </div>
+  );
+};
+
+export const SnowRushPrivateTestView: React.FC<SnowRushPrivateTestViewProps> = ({
+  onExitPrivateTest,
+  workerBaseUrlOverride,
+}) => {
+  const { currentUser, userProfile, loading } = useAuth();
+  return (
+    <SnowRushPrivateTestViewContent
+      onExitPrivateTest={onExitPrivateTest}
+      workerBaseUrlOverride={workerBaseUrlOverride}
+      currentUserUid={currentUser?.uid ?? null}
+      userProfile={userProfile}
+      loading={loading}
+    />
   );
 };
 

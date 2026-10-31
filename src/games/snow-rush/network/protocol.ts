@@ -431,8 +431,10 @@ export function parseSnowRushServerMessage(rawText: string): SnowRushServerMessa
 }
 
 function readConfiguredSnowRushWorkerBaseUrl(explicitBaseUrl?: string | null): string | null {
-  let rawBase = explicitBaseUrl ?? '';
-  if (!rawBase) {
+  let rawBase = '';
+  if (explicitBaseUrl !== undefined) {
+    rawBase = explicitBaseUrl ?? '';
+  } else {
     try {
       const metaEnv = (import.meta as unknown as { env?: Record<string, unknown> }).env;
       if (metaEnv && typeof metaEnv.VITE_SNOW_RUSH_WS_URL === 'string') {
