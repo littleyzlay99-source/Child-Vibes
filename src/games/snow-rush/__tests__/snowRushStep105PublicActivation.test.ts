@@ -628,10 +628,248 @@ async function runStep105PublicActivationTests(): Promise<void> {
     }
 
     passed += 1;
-    console.log('PASS [9/9] Snakes & Ladders gameplay, room lifecycle & XP/Points rewards 100% intact');
+    console.log('PASS [9/10] Snakes & Ladders gameplay, room lifecycle & XP/Points rewards 100% intact');
   }
 
-  console.log(`\nStep 10.5 Public Activation Code-Level Verification: ${passed}/9 test groups PASSED.`);
+  // ---------------------------------------------------------------------------
+  // Test 10: Firestore Security Rules `allow create` 1:1 Payload Compliance
+  //          (Snow Rush 2–4P + Oversized Profile Edge Cases + Snakes & Ladders + Negative Blocks)
+  // ---------------------------------------------------------------------------
+  {
+    const SERVER_TIME = { __serverTimestamp: true } as const;
+    const ALLOWED_PLAYER_KEYS = new Set([
+      'uid',
+      'playerId',
+      'displayName',
+      'photoURL',
+      'isReady',
+      'color',
+      'position',
+      'positionVersion',
+      'lastMoveId',
+      'updatedAtMs',
+      'activeTokenSkin',
+      'isConnected',
+      'lastSeen',
+      'rank',
+      'disconnectedAt',
+    ]);
+    const ALLOWED_ROOM_KEYS = new Set([
+      'id',
+      'roomCode',
+      'gameType',
+      'hostId',
+      'hostName',
+      'status',
+      'maxPlayers',
+      'playerCount',
+      'players',
+      'currentTurnIndex',
+      'lastDiceRoll',
+      'lastMoveSummary',
+      'winnerId',
+      'winnerName',
+      'matchParticipantIds',
+      'exactFinish',
+      'stateVersion',
+      'gameRound',
+      'lastMoveId',
+      'playerPositions',
+      'presence',
+      'turnStartTimestamp',
+      'turnDeadline',
+      'reconnectionDeadline',
+      'disconnectedPlayerId',
+      'disconnectedPlayerName',
+      'lastMoveTimestamp',
+      'lastMovePath',
+      'lastMovingPlayerUid',
+      'createdAt',
+      'updatedAt',
+      'timestamp',
+      'serverUpdatedAt',
+    ]);
+
+    const evaluateFirestoreRoomAllowCreate = (
+      roomId: string,
+      authUid: string | null,
+      data: Record<string, any>
+    ): boolean => {
+      if (!authUid) return false;
+      if (!/^[a-zA-Z0-9_-]{1,128}$/.test(roomId)) return false;
+      const requiredRoomKeys = [
+        'id',
+        'roomCode',
+        'gameType',
+        'hostId',
+        'status',
+        'maxPlayers',
+        'players',
+      ];
+      if (!requiredRoomKeys.every((k) => k in data)) return false;
+      if (!Object.keys(data).every((k) => ALLOWED_ROOM_KEYS.has(k))) return false;
+      if (typeof data.id !== 'string' || data.id.length < 6 || data.id.length > 64) return false;
+      if (typeof data.roomCode !== 'string' || data.roomCode.length < 4 || data.roomCode.length > 16)
+        return false;
+      if (data.gameType !== 'snakes_and_ladders' && data.gameType !== 'snow_rush') return false;
+      if (typeof data.hostId !== 'string' || data.hostId.length < 1 || data.hostId.length > 128)
+        return false;
+      if ('hostName' in data && (typeof data.hostName !== 'string' || data.hostName.length > 60))
+        return false;
+      if (!['waiting', 'full', 'playing', 'finished'].includes(data.status)) return false;
+      if (typeof data.maxPlayers !== 'number' || data.maxPlayers < 2 || data.maxPlayers > 4)
+        return false;
+      if (!Array.isArray(data.players) || data.players.length !== 1) return false;
+
+      const p = data.players[0];
+      if (!p || typeof p !== 'object') return false;
+      if (!['uid', 'displayName', 'isReady', 'position'].every((k) => k in p)) return false;
+      if (!Object.keys(p).every((k) => ALLOWED_PLAYER_KEYS.has(k))) return false;
+      if (typeof p.uid !== 'string' || p.uid.length < 1 || p.uid.length > 128) return false;
+      if ('playerId' in p && (typeof p.playerId !== 'string' || p.playerId.length > 32)) return false;
+      if (typeof p.displayName !== 'string' || p.displayName.length < 1 || p.displayName.length > 60)
+        return false;
+      if ('photoURL' in p && (typeof p.photoURL !== 'string' || p.photoURL.length > 1000))
+        return false;
+      if (typeof p.isReady !== 'boolean') return false;
+      if ('color' in p && (typeof p.color !== 'string' || p.color.length > 24)) return false;
+      if (typeof p.position !== 'number' || p.position < 1 || p.position > 100) return false;
+      if ('positionVersion' in p && (typeof p.positionVersion !== 'number' || p.positionVersion < 1))
+        return false;
+      if (
+        'activeTokenSkin' in p &&
+        (typeof p.activeTokenSkin !== 'string' || p.activeTokenSkin.length > 50)
+      )
+        return false;
+
+      if ('playerCount' in data && data.playerCount !== 1) return false;
+      if ('lastMoveSummary' in data && (typeof data.lastMoveSummary !== 'string' || data.lastMoveSummary.length > 500))
+        return false;
+      if ('winnerId' in data && data.winnerId !== null) return false;
+      if ('winnerName' in data && data.winnerName !== null) return false;
+      if (!('gameRound' in data) || data.gameRound !== 1) return false;
+      if (!('stateVersion' in data) || data.stateVersion !== 1) return false;
+      if ('timestamp' in data && data.timestamp !== SERVER_TIME) return false;
+      if ('serverUpdatedAt' in data && data.serverUpdatedAt !== SERVER_TIME) return false;
+
+      // Snow Rush Phase 1 Lock inside isValidGameRoom
+      if (
+        data.gameType === 'snow_rush' &&
+        (!['waiting', 'full', 'playing'].includes(data.status) ||
+          data.winnerId !== null ||
+          data.winnerName !== null)
+      ) {
+        return false;
+      }
+
+      // allow create invariants
+      return (
+        data.id === roomId &&
+        roomId === `room_${data.roomCode}` &&
+        data.hostId === authUid &&
+        data.status === 'waiting' &&
+        p.uid === authUid &&
+        p.position === 1
+      );
+    };
+
+    // 10a. Snow Rush 2/3/4 player rooms with normal AND oversized Google/custom profile fields
+    const edgeCaseHost = makeHostProfile({
+      id: 'JerguuEmgjZJ6ZvamqsucN08vds1',
+      playerId: 'SG-999999-EXTREMELY-LONG-PLAYER-ID-OVER-32-CHARS',
+      displayName: 'အောင်မြင့်ထွန်း '.repeat(10), // > 60 chars before sanitization
+      photoURL: 'data:image/png;base64,' + 'A'.repeat(2500), // > 1000 chars before sanitization
+      activeTokenSkin: 'token_crown_' + 'x'.repeat(80), // > 50 chars before sanitization
+    });
+
+    for (const maxPlayers of [2, 3, 4]) {
+      const resolvedSnow = resolveCreateGameRoomInput('snow_rush', { maxPlayers });
+      const snowPayload = {
+        ...buildInitialGameRoom({
+          hostUser: edgeCaseHost,
+          effectiveHostUid: edgeCaseHost.id,
+          roomCode: `SR0${maxPlayers}OK`,
+          resolved: resolvedSnow,
+          now: 1760000100000,
+        }),
+        timestamp: SERVER_TIME,
+        serverUpdatedAt: SERVER_TIME,
+      };
+      assert.equal(
+        evaluateFirestoreRoomAllowCreate(`room_SR0${maxPlayers}OK`, edgeCaseHost.id, snowPayload),
+        true,
+        `Snow Rush maxPlayers=${maxPlayers} room create payload MUST pass firestore.rules allow create`
+      );
+    }
+
+    // 10b. Snakes & Ladders 2/3/4 player rooms (exactFinish false & true)
+    for (const exactFinish of [false, true]) {
+      const resolvedSnakes = resolveCreateGameRoomInput('snakes_and_ladders', {
+        maxPlayers: 4,
+        exactFinish,
+      });
+      const snakesPayload = {
+        ...buildInitialGameRoom({
+          hostUser: edgeCaseHost,
+          effectiveHostUid: edgeCaseHost.id,
+          roomCode: exactFinish ? 'SL4EX1' : 'SL4EX0',
+          resolved: resolvedSnakes,
+          now: 1760000110000,
+        }),
+        timestamp: SERVER_TIME,
+        serverUpdatedAt: SERVER_TIME,
+      };
+      assert.equal(
+        evaluateFirestoreRoomAllowCreate(snakesPayload.id, edgeCaseHost.id, snakesPayload),
+        true,
+        `Snakes & Ladders exactFinish=${exactFinish} room create payload MUST pass firestore.rules allow create`
+      );
+    }
+
+    // 10c. Security negative checks: forged status='finished', forged winnerId, mismatched hostId, unauthenticated
+    const baseValidSnow = {
+      ...buildInitialGameRoom({
+        hostUser: makeHostProfile(),
+        effectiveHostUid: 'uid_host_105',
+        roomCode: 'SRSEC1',
+        resolved: resolveCreateGameRoomInput('snow_rush', { maxPlayers: 4 }),
+        now: 1760000120000,
+      }),
+      timestamp: SERVER_TIME,
+      serverUpdatedAt: SERVER_TIME,
+    };
+    assert.equal(
+      evaluateFirestoreRoomAllowCreate('room_SRSEC1', null, baseValidSnow),
+      false,
+      'Unauthenticated room create MUST be rejected'
+    );
+    assert.equal(
+      evaluateFirestoreRoomAllowCreate('room_SRSEC1', 'uid_impersonator', baseValidSnow),
+      false,
+      'Impersonated hostId != request.auth.uid MUST be rejected'
+    );
+    assert.equal(
+      evaluateFirestoreRoomAllowCreate('room_SRSEC1', 'uid_host_105', {
+        ...baseValidSnow,
+        status: 'finished',
+      }),
+      false,
+      'Snow Rush room create with status=finished MUST be rejected'
+    );
+    assert.equal(
+      evaluateFirestoreRoomAllowCreate('room_SRSEC1', 'uid_host_105', {
+        ...baseValidSnow,
+        winnerId: 'uid_host_105',
+      }),
+      false,
+      'Snow Rush room create with non-null winnerId MUST be rejected'
+    );
+
+    passed += 1;
+    console.log('PASS [10/10] Firestore Security Rules allow create 1:1 compliance (Snow Rush + Snakes & Ladders + Negative Security)');
+  }
+
+  console.log(`\nStep 10.5 Public Activation Code-Level Verification: ${passed}/10 test groups PASSED.`);
 }
 
 runStep105PublicActivationTests()

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { User, onAuthStateChanged } from 'firebase/auth';
 import {
   doc,
@@ -57,6 +57,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [userTransactions, setUserTransactions] = useState<PointTransaction[]>([]);
+  const loginInFlightRef = useRef<Promise<void> | null>(null);
 
   useEffect(() => {
     let unsubscribeProfile: (() => void) | null = null;
@@ -225,13 +226,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const loginWithGoogle = async () => {
-    sounds.playClick();
-    try {
-      await signInWithPopup(auth, googleProvider);
-    } catch (error) {
-      console.error('Login error:', error);
-      throw error;
+    if (loginInFlightRef.current) {
+      return loginInFlightRef.current;
     }
+
+    // Call signInWithPopup synchronously first to preserve browser user-gesture activation
+    const popupPromise = signInWithPopup(auth, googleProvider);
+    sounds.playClick();
+
+    const task = (async () => {
+      try {
+        await popupPromise;
+      } finally {
+        loginInFlightRef.current = null;
+      }
+    })();
+
+    loginInFlightRef.current = task;
+    return task;
   };
 
   const logout = async () => {

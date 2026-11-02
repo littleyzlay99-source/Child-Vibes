@@ -44,6 +44,7 @@ export type RoomJoinErrorCode =
   | 'GAME_PLAYING'
   | 'GAME_FINISHED'
   | 'AUTH_REQUIRED'
+  | 'PERMISSION_DENIED'
   | 'NETWORK_ERROR'
   | 'UNKNOWN_ERROR';
 
@@ -86,7 +87,11 @@ export function generateUniqueMoveId(now: number = Date.now()): string {
  * Classify errors from room join/create into distinct user-facing Burmese messages
  * (separating Network Error, Room Full Error, Invalid Code, Game Playing, etc.)
  */
-function classifyJoinError(error: unknown, roomPath: string): RoomJoinError {
+function classifyJoinError(
+  error: unknown,
+  roomPath: string,
+  operation: 'create' | 'join' = 'join'
+): RoomJoinError {
   if (error instanceof RoomJoinError) {
     return error;
   }
@@ -111,21 +116,38 @@ function classifyJoinError(error: unknown, roomPath: string): RoomJoinError {
     );
   }
 
-  // Log diagnostic info for unexpected Firestore/permission issues without throwing raw JSON to UI
-  try {
-    console.error('Room join diagnostic error:', {
+  if (
+    errCode === 'permission-denied' ||
+    lowerMsg.includes('missing or insufficient permissions')
+  ) {
+    console.warn('Room permission notice:', {
+      operation,
       path: roomPath,
-      code: errCode,
-      message: errMsg,
-      uid: auth.currentUser?.uid,
+      code: errCode || 'permission-denied',
+      uid: auth.currentUser?.uid ?? null,
     });
-  } catch {
-    // Ignore logging errors
+    return new RoomJoinError(
+      'PERMISSION_DENIED',
+      operation === 'create'
+        ? 'အခန်းဖန်တီးရန် ခွင့်ပြုချက် စစ်ဆေးရာတွင် အဆင်မပြေဖြစ်သွားပါသည်။ အကောင့်ပြန်စစ်ဆေးပြီး ထပ်မံကြိုးစားပေးပါ။'
+        : 'အခန်းခွင့်ပြုချက် စစ်ဆေးရာတွင် အဆင်မပြေဖြစ်သွားပါသည်။ အကောင့်ပြန်စစ်ဆေးပြီး ထပ်မံကြိုးစားပေးပါ။'
+    );
   }
+
+  // Log diagnostic info for unexpected Firestore issues without throwing raw JSON to UI
+  console.warn('Room operation diagnostic notice:', {
+    operation,
+    path: roomPath,
+    code: errCode,
+    message: errMsg,
+    uid: auth.currentUser?.uid,
+  });
 
   return new RoomJoinError(
     'UNKNOWN_ERROR',
-    'အခန်းသို့ ဝင်ရောက်ရာတွင် အဆင်မပြေဖြစ်သွားပါသည်။ ခဏစောင့်ပြီး ပြန်လည်ကြိုးစားပေးပါ။'
+    operation === 'create'
+      ? 'အခန်းအသစ် ဖန်တီးရာတွင် အဆင်မပြေဖြစ်သွားပါသည်။ ခဏစောင့်ပြီး ပြန်လည်ကြိုးစားပေးပါ။'
+      : 'အခန်းသို့ ဝင်ရောက်ရာတွင် အဆင်မပြေဖြစ်သွားပါသည်။ ခဏစောင့်ပြီး ပြန်လည်ကြိုးစားပေးပါ။'
   );
 }
 
@@ -290,14 +312,14 @@ export function buildInitialGameRoom(params: {
     roomCode,
     gameType: resolved.gameType,
     hostId: effectiveHostUid,
-    hostName: hostUser.displayName,
+    hostName: initialPlayer.displayName,
     status: 'waiting',
     maxPlayers: resolved.maxPlayers,
     playerCount: 1,
     players: [initialPlayer],
     currentTurnIndex: 0,
     lastDiceRoll: 1,
-    lastMoveSummary: `${hostUser.displayName} မှ အခန်းဖန်တီးထားပါသည်။`,
+    lastMoveSummary: `${initialPlayer.displayName} မှ အခန်းဖန်တီးထားပါသည်။`.slice(0, 500),
     winnerId: null,
     winnerName: null,
     matchParticipantIds: [],
@@ -340,8 +362,8 @@ export async function createGameRoom(
   gameTypeOrMaxPlayers?: RegisteredGameId | string | number,
   gameOptionsOrExactFinish?: SnakesAndLaddersRoomOptions | BaseGameRoomOptions | boolean
 ): Promise<JoinRoomResult> {
-  const effectiveHostUid = auth.currentUser?.uid || hostUser?.id;
-  if (!effectiveHostUid) {
+  const effectiveHostUid = auth.currentUser?.uid?.trim();
+  if (!effectiveHostUid || !hostUser) {
     throw new RoomJoinError('AUTH_REQUIRED', 'ကျေးဇူးပြု၍ အကောင့်အရင်ဝင်ရောက်ပေးပါ။');
   }
 
@@ -375,7 +397,7 @@ export async function createGameRoom(
       alreadyJoined: false,
     };
   } catch (error) {
-    throw classifyJoinError(error, `rooms/${roomId}`);
+    throw classifyJoinError(error, `rooms/${roomId}`, 'create');
   }
 }
 
@@ -399,8 +421,8 @@ export async function joinGameRoomByCode(
     );
   }
 
-  const effectiveUid = auth.currentUser?.uid || user.id;
-  if (!effectiveUid) {
+  const effectiveUid = auth.currentUser?.uid?.trim();
+  if (!effectiveUid || !user) {
     throw new RoomJoinError('AUTH_REQUIRED', 'ကျေးဇူးပြု၍ အကောင့်အရင်ဝင်ရောက်ပေးပါ။');
   }
 
@@ -513,7 +535,10 @@ export async function joinGameRoomByCode(
             nextDiscId = null;
             nextDiscName = null;
             nextReconDeadline = null;
-            nextSummary = `ကစားသမား ${user.displayName} ပြန်လည်ချိတ်ဆက်မိပါပြီ။`;
+            nextSummary = `ကစားသမား ${existingPlayer.displayName} ပြန်လည်ချိတ်ဆက်မိပါပြီ။`.slice(
+              0,
+              500
+            );
             updates.disconnectedPlayerId = null;
             updates.disconnectedPlayerName = null;
             updates.reconnectionDeadline = null;
@@ -595,12 +620,16 @@ export async function joinGameRoomByCode(
           txNow
         );
 
-        const updatedPlayers = [...uniquePlayers, newPlayer];
+        const preservedExistingPlayers =
+          !hadDuplicateEntries && Array.isArray(roomData.players)
+            ? roomData.players.map((p) => sanitizePlayer(p, txNow))
+            : uniquePlayers;
+        const updatedPlayers = [...preservedExistingPlayers, newPlayer];
         const newPlayerCount = updatedPlayers.length;
         const nextStatus = computeLobbyStatus(newPlayerCount, maxPlayers);
         const nextStateVersion = (roomData.stateVersion || 1) + 1;
         const updatedPositions = buildPlayerPositionsMap(updatedPlayers, txNow);
-        const nextSummary = `${user.displayName} အခန်းသို့ ဝင်ရောက်လာခဲ့သည်။`;
+        const nextSummary = `${newPlayer.displayName} အခန်းသို့ ဝင်ရောက်လာခဲ့သည်။`.slice(0, 500);
         const nextPresenceEntry: PlayerPresenceEntry = {
           isConnected: true,
           lastSeen: txNow,
@@ -612,6 +641,8 @@ export async function joinGameRoomByCode(
           playerCount: newPlayerCount,
           maxPlayers,
           status: nextStatus,
+          winnerId: null,
+          winnerName: null,
           playerPositions: updatedPositions,
           [`presence.${effectiveUid}`]: nextPresenceEntry,
           stateVersion: nextStateVersion,

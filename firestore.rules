@@ -257,12 +257,23 @@ service cloud.firestore {
         (!('stateVersion' in oldRoom) || newRoom.stateVersion > oldRoom.stateVersion);
     }
 
+    function sameWinnerId(oldRoom, newRoom) {
+      return (
+        (!('winnerId' in oldRoom) || oldRoom.winnerId == null) &&
+        (!('winnerId' in newRoom) || newRoom.winnerId == null)
+      ) || (
+        ('winnerId' in oldRoom) &&
+        ('winnerId' in newRoom) &&
+        oldRoom.winnerId == newRoom.winnerId
+      );
+    }
+
     function isCurrentTurnPlayer(roomData, uid) {
       return ('currentTurnIndex' in roomData) &&
-        roomData.currentTurnIndex is int &&
+        roomData.currentTurnIndex is number &&
         roomData.currentTurnIndex >= 0 &&
         roomData.currentTurnIndex < roomData.players.size() &&
-        roomData.players[roomData.currentTurnIndex].uid == uid;
+        roomData.players[int(roomData.currentTurnIndex)].uid == uid;
     }
 
     function nonTurnPlayerPositionsUnchanged(oldPlayers, newPlayers, turnIdx) {
@@ -302,7 +313,7 @@ service cloud.firestore {
       ) || (
         oldRoom.status == 'finished' &&
         newRoom.status == 'finished' &&
-        newRoom.winnerId == oldRoom.winnerId
+        sameWinnerId(oldRoom, newRoom)
       );
     }
 
@@ -332,15 +343,15 @@ service cloud.firestore {
         hasUniquePlayerUids(data.players) &&
         isPlayerInList(data.players, data.hostId) &&
         (!('playerCount' in data) || (data.playerCount is number && data.playerCount == data.players.size())) &&
-        (!('currentTurnIndex' in data) || (data.currentTurnIndex is int && data.currentTurnIndex >= 0 && data.currentTurnIndex < 4)) &&
-        (!('lastDiceRoll' in data) || (data.lastDiceRoll is int && data.lastDiceRoll >= 1 && data.lastDiceRoll <= 6)) &&
+        (!('currentTurnIndex' in data) || (data.currentTurnIndex is number && data.currentTurnIndex >= 0 && data.currentTurnIndex < 4)) &&
+        (!('lastDiceRoll' in data) || (data.lastDiceRoll is number && data.lastDiceRoll >= 1 && data.lastDiceRoll <= 6)) &&
         (!('matchParticipantIds' in data) || (
           data.matchParticipantIds is list && data.matchParticipantIds.size() <= 4 &&
           (data.matchParticipantIds.size() == 0 || (data.matchParticipantIds[0] is string && data.matchParticipantIds[0].size() <= 128))
         )) &&
         (!('exactFinish' in data) || data.exactFinish is bool) &&
         (!('stateVersion' in data) || (data.stateVersion is number && data.stateVersion >= 1)) &&
-        (!('gameRound' in data) || (data.gameRound is int && data.gameRound >= 1)) &&
+        (!('gameRound' in data) || (data.gameRound is number && data.gameRound >= 1)) &&
         (!('lastMoveId' in data) || data.lastMoveId == null || (data.lastMoveId is string && data.lastMoveId.size() <= 80)) &&
         (!('playerPositions' in data) || (data.playerPositions is map && data.playerPositions.size() <= 4)) &&
         (!('presence' in data) || (data.presence is map && data.presence.size() <= 16)) &&
@@ -375,10 +386,10 @@ service cloud.firestore {
         data.id is string && data.id.size() <= 128 &&
         data.userId is string && data.userId.size() <= 128 && data.userId == request.auth.uid &&
         data.roomId is string && data.roomId.size() <= 64 && isValidId(data.roomId) &&
-        data.gameRound is int && data.gameRound >= 1 &&
+        data.gameRound is number && data.gameRound >= 1 &&
         data.outcome in ['win', 'loss'] &&
-        data.xpGranted is int && (data.xpGranted == 100 || data.xpGranted == 75) &&
-        data.pointsGranted is int && (data.pointsGranted == 1000 || data.pointsGranted == 500) &&
+        data.xpGranted is number && (data.xpGranted == 100 || data.xpGranted == 75) &&
+        data.pointsGranted is number && (data.pointsGranted == 1000 || data.pointsGranted == 500) &&
         data.createdAt is string && data.createdAt.size() <= 40 &&
         data.serverCreatedAt == request.time;
     }
@@ -388,7 +399,7 @@ service cloud.firestore {
         data.keys().hasOnly(['id', 'userId', 'dayBucket', 'xpGranted', 'pointsGranted', 'createdAt', 'serverCreatedAt']) &&
         data.id is string && data.id.size() <= 128 &&
         data.userId is string && data.userId.size() <= 128 && data.userId == request.auth.uid &&
-        data.dayBucket is int && data.dayBucket >= 19000 &&
+        data.dayBucket is number && data.dayBucket >= 19000 &&
         data.xpGranted == 80 &&
         data.pointsGranted == 100 &&
         data.createdAt is string && data.createdAt.size() <= 40 &&
@@ -401,8 +412,8 @@ service cloud.firestore {
         data.id is string && data.id.size() <= 128 &&
         data.userId is string && data.userId.size() <= 128 && data.userId == request.auth.uid &&
         data.achievementId is string && data.achievementId in ['first_win', 'win_5', 'games_10', 'reach_lvl_5'] &&
-        data.xpGranted is int && data.xpGranted > 0 &&
-        data.pointsGranted is int && data.pointsGranted > 0 &&
+        data.xpGranted is number && data.xpGranted > 0 &&
+        data.pointsGranted is number && data.pointsGranted > 0 &&
         data.createdAt is string && data.createdAt.size() <= 40 &&
         data.serverCreatedAt == request.time;
     }
@@ -611,7 +622,7 @@ service cloud.firestore {
           ) ||
           // Action 2: New Player Join Waiting Room (Appends Self Only)
           (
-            existing().status == 'waiting' &&
+            existing().status in ['waiting', 'full'] &&
             !isPlayerInList(existing().players, request.auth.uid) &&
             existing().players.size() >= 1 &&
             existing().players.size() < existing().maxPlayers &&
@@ -637,11 +648,11 @@ service cloud.firestore {
             onlyCallerChangedReady(existing().players, incoming().players, request.auth.uid) &&
             incoming().hostId == existing().hostId &&
             existingGameRound(incoming()) == existingGameRound(existing()) &&
-            incoming().winnerId == existing().winnerId &&
+            sameWinnerId(existing(), incoming()) &&
             incoming().status == (existing().status == 'playing' ? 'playing' : (incoming().players.size() >= incoming().maxPlayers ? 'full' : 'waiting')) &&
             (
-              !('disconnectedPlayerId' in incoming().diff(existing()).affectedKeys()) ||
-              (existing().disconnectedPlayerId == request.auth.uid && incoming().disconnectedPlayerId == null && incoming().reconnectionDeadline == null)
+              !incoming().diff(existing()).affectedKeys().hasAny(['disconnectedPlayerId']) ||
+              (('disconnectedPlayerId' in existing()) && existing().disconnectedPlayerId == request.auth.uid && incoming().disconnectedPlayerId == null && incoming().reconnectionDeadline == null)
             ) &&
             hasMonotonicStateVersion(existing(), incoming()) &&
             incoming().diff(existing()).affectedKeys().hasOnly([
@@ -664,8 +675,8 @@ service cloud.firestore {
             allPlayersAtStartPosition(incoming().players) &&
             (!('winnerId' in incoming()) || incoming().winnerId == null) &&
             (!('winnerName' in incoming()) || incoming().winnerName == null) &&
-            ('gameRound' in incoming()) && incoming().gameRound is int &&
-            incoming().gameRound == existingGameRound(existing()) + 1 &&
+            ('gameRound' in incoming()) && incoming().gameRound is number &&
+            int(incoming().gameRound) == existingGameRound(existing()) + 1 &&
             hasMonotonicStateVersion(existing(), incoming()) &&
             incoming().diff(existing()).affectedKeys().hasOnly([
               'status', 'players', 'playerCount', 'playerPositions',
@@ -683,12 +694,12 @@ service cloud.firestore {
             (!('winnerId' in existing()) || existing().winnerId == null) &&
             isCurrentTurnPlayer(existing(), request.auth.uid) &&
             samePlayerRosterUids(existing().players, incoming().players) &&
-            nonTurnPlayerPositionsUnchanged(existing().players, incoming().players, existing().currentTurnIndex) &&
+            nonTurnPlayerPositionsUnchanged(existing().players, incoming().players, int(existing().currentTurnIndex)) &&
             isValidSnakesTurnPositionStep(
-              existing().players[existing().currentTurnIndex].position,
-              incoming().players[existing().currentTurnIndex].position
+              existing().players[int(existing().currentTurnIndex)].position,
+              incoming().players[int(existing().currentTurnIndex)].position
             ) &&
-            incoming().lastDiceRoll is int && incoming().lastDiceRoll >= 1 && incoming().lastDiceRoll <= 6 &&
+            incoming().lastDiceRoll is number && incoming().lastDiceRoll >= 1 && incoming().lastDiceRoll <= 6 &&
             incoming().lastMovingPlayerUid == request.auth.uid &&
             incoming().hostId == existing().hostId &&
             existingGameRound(incoming()) == existingGameRound(existing()) &&
@@ -698,8 +709,8 @@ service cloud.firestore {
                 : (
                   incoming().status == 'finished' &&
                   incoming().winnerId == request.auth.uid &&
-                  existing().players[existing().currentTurnIndex].position >= 94 &&
-                  incoming().players[existing().currentTurnIndex].position == 100
+                  existing().players[int(existing().currentTurnIndex)].position >= 94 &&
+                  incoming().players[int(existing().currentTurnIndex)].position == 100
                 )
             ) &&
             hasMonotonicStateVersion(existing(), incoming()) &&
@@ -723,9 +734,9 @@ service cloud.firestore {
             samePlayersReady(existing().players, incoming().players) &&
             incoming().hostId == existing().hostId &&
             existingGameRound(incoming()) == existingGameRound(existing()) &&
-            incoming().winnerId == existing().winnerId &&
+            sameWinnerId(existing(), incoming()) &&
             (
-              !('disconnectedPlayerId' in incoming().diff(existing()).affectedKeys()) ||
+              !incoming().diff(existing()).affectedKeys().hasAny(['disconnectedPlayerId']) ||
               incoming().disconnectedPlayerId == request.auth.uid ||
               incoming().disconnectedPlayerId == null
             ) &&
@@ -784,8 +795,8 @@ service cloud.firestore {
             incoming().status == (incoming().players.size() >= incoming().maxPlayers ? 'full' : 'waiting') &&
             (!('winnerId' in incoming()) || incoming().winnerId == null) &&
             (!('winnerName' in incoming()) || incoming().winnerName == null) &&
-            ('gameRound' in incoming()) && incoming().gameRound is int &&
-            incoming().gameRound == existingGameRound(existing()) + 1 &&
+            ('gameRound' in incoming()) && incoming().gameRound is number &&
+            int(incoming().gameRound) == existingGameRound(existing()) + 1 &&
             hasMonotonicStateVersion(existing(), incoming()) &&
             incoming().diff(existing()).affectedKeys().hasOnly([
               'players', 'playerCount', 'playerPositions', 'status',

@@ -46,27 +46,53 @@ export function sanitizePlayer(
       ? Math.floor(merged.positionVersion)
       : 1;
 
+  const safeUid = (typeof merged.uid === 'string' ? merged.uid.trim() : '').slice(0, 128);
+  const rawPlayerId = typeof merged.playerId === 'string' ? merged.playerId.trim() : '';
+  const safePlayerId = (rawPlayerId || `PL-${safeUid.substring(0, 6)}`).slice(0, 32);
+  const rawDisplayName = typeof merged.displayName === 'string' ? merged.displayName.trim() : '';
+  const safeDisplayName = (rawDisplayName || 'ကစားသမား').slice(0, 60);
+  const safePhotoURL =
+    typeof merged.photoURL === 'string' && merged.photoURL.length <= 1000
+      ? merged.photoURL
+      : '';
+  const safeColor = (
+    (typeof merged.color === 'string' ? merged.color.trim() : '') || '#3B82F6'
+  ).slice(0, 24);
+  const safeTokenSkin = (
+    (typeof merged.activeTokenSkin === 'string' ? merged.activeTokenSkin.trim() : '') ||
+    'token_crown'
+  ).slice(0, 50);
+  const safeLastMoveId =
+    typeof merged.lastMoveId === 'string' ? merged.lastMoveId.slice(0, 80) : null;
+
   const clean: RoomPlayer = {
-    uid: merged.uid,
-    playerId: merged.playerId || `PL-${merged.uid.substring(0, 6)}`,
-    displayName: merged.displayName || 'ကစားသမား',
-    photoURL: merged.photoURL || '',
+    uid: safeUid,
+    playerId: safePlayerId,
+    displayName: safeDisplayName,
+    photoURL: safePhotoURL,
     isReady: !!merged.isReady,
-    color: merged.color || '#3B82F6',
+    color: safeColor,
     position: safePos,
     positionVersion: safeVer,
-    lastMoveId: merged.lastMoveId ?? null,
+    lastMoveId: safeLastMoveId,
     updatedAtMs: typeof merged.updatedAtMs === 'number' ? merged.updatedAtMs : now,
-    activeTokenSkin: merged.activeTokenSkin || 'token_crown',
+    activeTokenSkin: safeTokenSkin,
     isConnected: merged.isConnected !== false,
     lastSeen: typeof merged.lastSeen === 'number' ? merged.lastSeen : now,
   };
 
-  if (merged.rank !== undefined && merged.rank !== null) {
-    clean.rank = merged.rank;
+  if (
+    typeof merged.rank === 'number' &&
+    merged.rank >= 1 &&
+    merged.rank <= 4
+  ) {
+    clean.rank = Math.floor(merged.rank);
   }
   if (merged.disconnectedAt !== undefined) {
-    clean.disconnectedAt = merged.disconnectedAt;
+    clean.disconnectedAt =
+      typeof merged.disconnectedAt === 'number' && merged.disconnectedAt >= 0
+        ? merged.disconnectedAt
+        : null;
   }
 
   return clean;

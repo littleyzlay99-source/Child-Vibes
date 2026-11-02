@@ -20,10 +20,12 @@ export const LoginScreen: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isUnauthorizedDomain, setIsUnauthorizedDomain] = useState(false);
+  const [isPopupBlocked, setIsPopupBlocked] = useState(false);
   const [copiedDomain, setCopiedDomain] = useState(false);
   const [showHostingGuide, setShowHostingGuide] = useState(false);
 
   const currentHostname = typeof window !== 'undefined' ? window.location.hostname : '';
+  const currentHref = typeof window !== 'undefined' ? window.location.href : '/';
 
   const handleCopyHostname = () => {
     if (typeof navigator !== 'undefined') {
@@ -35,25 +37,40 @@ export const LoginScreen: React.FC = () => {
   };
 
   const handleLogin = async () => {
+    if (isLoading) return;
+    // Invoke signInWithPopup immediately inside the synchronous click gesture
+    const loginPromise = loginWithGoogle();
     setIsLoading(true);
     setErrorMsg(null);
     setIsUnauthorizedDomain(false);
-    sounds.playClick();
+    setIsPopupBlocked(false);
+
     try {
-      await loginWithGoogle();
+      await loginPromise;
     } catch (error: any) {
-      console.error('Google sign-in error:', error);
-      if (error?.code === 'auth/unauthorized-domain') {
+      const code = error?.code as string | undefined;
+      if (code === 'auth/unauthorized-domain') {
         setIsUnauthorizedDomain(true);
-        setErrorMsg('Firebase တွင် Cloudflare Domain ခွင့်ပြုချက် (Authorized Domain) ထည့်သွင်းပေးရန် လိုအပ်နေပါသည်။');
-      } else if (error?.code === 'auth/popup-blocked') {
-        setErrorMsg('Browser တွင် Pop-up ပိတ်ထားသောကြောင့် Google Login window မပွင့်နိုင်ပါ။ ကျေးဇူးပြု၍ Browser Settings တွင် Pop-up ခွင့်ပြုပေးပါ။');
-      } else if (error?.code === 'auth/popup-closed-by-user') {
-        setErrorMsg('Google Login window ကို ပိတ်လိုက်သောကြောင့် အကောင့်မဝင်ရောက်နိုင်ပါ။');
-      } else if (error?.code === 'auth/network-request-failed') {
-        setErrorMsg('အင်တာနက်ချိတ်ဆက်မှု မတည်ငြိမ်သောကြောင့်ဖြစ်နိုင်ပါသည်။ အင်တာနက်စစ်ဆေးပြီး ပြန်လည်ကြိုးစားပေးပါ။');
+        setErrorMsg(
+          'Firebase တွင် Cloudflare Domain ခွင့်ပြုချက် (Authorized Domain) ထည့်သွင်းပေးရန် လိုအပ်နေပါသည်။'
+        );
+      } else if (code === 'auth/popup-blocked') {
+        setIsPopupBlocked(true);
+        setErrorMsg(
+          'Browser (သို့မဟုတ် Preview Window) တွင် Pop-up ပိတ်ထားသောကြောင့် Google Login ပွင့်မလာပါ။ Pop-up ခွင့်ပြုပေးပါ သို့မဟုတ် အောက်ပါခလုတ်ဖြင့် Tab အသစ်တွင် ဖွင့်၍ ဝင်ရောက်ပါ။'
+        );
+      } else if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+        setErrorMsg('Google Login window ကို ပိတ်လိုက်သောကြောင့် အကောင့်မဝင်ရောက်သေးပါ။ ထပ်မံနှိပ်၍ ဝင်ရောက်နိုင်ပါသည်။');
+      } else if (code === 'auth/network-request-failed') {
+        setErrorMsg(
+          'အင်တာနက်ချိတ်ဆက်မှု မတည်ငြိမ်သောကြောင့်ဖြစ်နိုင်ပါသည်။ အင်တာနက်စစ်ဆေးပြီး ပြန်လည်ကြိုးစားပေးပါ။'
+        );
       } else {
-        setErrorMsg(error?.message || 'Google Login ဝင်ရောက်ရာတွင် အခက်အခဲရှိနေပါသည်။ ကျေးဇူးပြု၍ ပြန်လည်ကြိုးစားပေးပါ။');
+        console.warn('Google sign-in notice:', code || error?.message || error);
+        setErrorMsg(
+          error?.message ||
+            'Google Login ဝင်ရောက်ရာတွင် အခက်အခဲရှိနေပါသည်။ ကျေးဇူးပြု၍ ပြန်လည်ကြိုးစားပေးပါ။'
+        );
       }
     } finally {
       setIsLoading(false);
@@ -103,17 +120,34 @@ export const LoginScreen: React.FC = () => {
             မင်္ဂလာပါ! အကောင့်ဝင်ရောက်ပါ
           </h1>
           <p className="text-sm text-slate-600 mb-8 max-w-md mx-auto leading-relaxed">
-            သူငယ်ချင်းများနှင့် အတူတူ အွန်လိုင်းမှတစ်ဆင့် မြွေနှင့်လှေကား မီနီဂိမ်းများ
+            သူငယ်ချင်းများနှင့် အတူတူ အွန်လိုင်းမှတစ်ဆင့် မြွေနှင့်လှေကားနှင့် Snow Rush မီနီဂိမ်းများ
             ကစားနိုင်ရန် သင်၏ Google (Gmail) Account ဖြင့် အလွယ်တကူ ဝင်ရောက်နိုင်ပါသည်။
           </p>
 
-          {/* Error Message & Unauthorized Domain Helper */}
+          {/* Error Message & Helpers */}
           {errorMsg && (
-            <div className="mb-6 p-4 rounded-2xl bg-rose-50 border border-rose-300 text-rose-800 text-xs text-left font-medium leading-relaxed space-y-2">
-              <div className="flex items-center gap-2 font-bold text-rose-900">
-                <AlertTriangle className="w-4 h-4 shrink-0 text-rose-600" />
+            <div className="mb-6 p-4 rounded-2xl bg-rose-50 border border-rose-300 text-rose-800 text-xs text-left font-medium leading-relaxed space-y-2.5">
+              <div className="flex items-start gap-2 font-bold text-rose-900">
+                <AlertTriangle className="w-4 h-4 shrink-0 text-rose-600 mt-0.5" />
                 <span>{errorMsg}</span>
               </div>
+
+              {isPopupBlocked && (
+                <div className="pt-2 border-t border-rose-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <span className="text-[11px] text-slate-700">
+                    Preview iframe အတွင်း Pop-up ပိတ်ခံရပါက Tab အသစ်တွင် ဖွင့်၍ တိုက်ရိုက် Login ဝင်နိုင်ပါသည် -
+                  </span>
+                  <a
+                    href={currentHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs transition shrink-0 shadow-2xs"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>Tab အသစ်တွင် ဖွင့်မည်</span>
+                  </a>
+                </div>
+              )}
 
               {isUnauthorizedDomain && (
                 <div className="pt-2 border-t border-rose-200 space-y-2 text-slate-700">
