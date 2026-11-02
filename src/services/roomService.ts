@@ -5,7 +5,13 @@ import {
   runTransaction,
   serverTimestamp,
 } from 'firebase/firestore';
-import { auth, db, handleFirestoreError, OperationType } from '../lib/firebase';
+import {
+  auth,
+  db,
+  extractFirebaseErrorCode,
+  handleFirestoreError,
+  OperationType,
+} from '../lib/firebase';
 import {
   DEFAULT_GAME_ID,
   GameRegistryEntry,
@@ -45,15 +51,23 @@ export type RoomJoinErrorCode =
   | 'GAME_FINISHED'
   | 'AUTH_REQUIRED'
   | 'PERMISSION_DENIED'
+  | 'FAILED_PRECONDITION'
+  | 'TRANSACTION_CONFLICT'
+  | 'QUOTA_EXCEEDED'
+  | 'INVALID_PAYLOAD'
   | 'NETWORK_ERROR'
   | 'UNKNOWN_ERROR';
 
 export class RoomJoinError extends Error {
   code: RoomJoinErrorCode;
-  constructor(code: RoomJoinErrorCode, message: string) {
+  readonly firebaseCode?: string;
+  constructor(code: RoomJoinErrorCode, message: string, firebaseCode?: string) {
     super(message);
     this.name = 'RoomJoinError';
     this.code = code;
+    if (firebaseCode) {
+      this.firebaseCode = firebaseCode;
+    }
   }
 }
 
@@ -84,10 +98,12 @@ export function generateUniqueMoveId(now: number = Date.now()): string {
 }
 
 /**
- * Classify errors from room join/create into distinct user-facing Burmese messages
- * (separating Network Error, Room Full Error, Invalid Code, Game Playing, etc.)
+ * Classify errors from room join/create into distinct user-facing Burmese messages,
+ * separating permission-denied, unauthenticated, failed-precondition, aborted,
+ * resource-exhausted, invalid-argument, network errors, and unknown errors.
+ * Never logs authentication tokens, passwords, emails, UIDs, or personal data.
  */
-function classifyJoinError(
+export function classifyRoomOperationError(
   error: unknown,
   roomPath: string,
   operation: 'create' | 'join' = 'join'
@@ -96,15 +112,27 @@ function classifyJoinError(
     return error;
   }
 
-  const errCode = (error as any)?.code as string | undefined;
+  const normalizedFirebaseCode = extractFirebaseErrorCode(error);
   const errMsg = error instanceof Error ? error.message : String(error);
   const lowerMsg = errMsg.toLowerCase();
+  const hasAuthenticatedUser = Boolean(auth.currentUser?.uid?.trim());
+
+  const logSafeRoomDiagnostic = (category: RoomJoinErrorCode) => {
+    console.warn('Room operation notice:', {
+      operation,
+      path: roomPath,
+      firebaseCode: normalizedFirebaseCode,
+      category,
+      isAuthenticated: hasAuthenticatedUser,
+    });
+  };
 
   const isOfflineOrNetwork =
     (typeof navigator !== 'undefined' && navigator.onLine === false) ||
-    errCode === 'unavailable' ||
-    errCode === 'deadline-exceeded' ||
-    errCode === 'network-request-failed' ||
+    normalizedFirebaseCode === 'unavailable' ||
+    normalizedFirebaseCode === 'deadline-exceeded' ||
+    normalizedFirebaseCode === 'network-request-failed' ||
+    normalizedFirebaseCode === 'auth/network-request-failed' ||
     lowerMsg.includes('offline') ||
     lowerMsg.includes('network') ||
     lowerMsg.includes('failed to fetch');
@@ -112,44 +140,88 @@ function classifyJoinError(
   if (isOfflineOrNetwork) {
     return new RoomJoinError(
       'NETWORK_ERROR',
-      'အင်တာနက်ချိတ်ဆက်မှု မတည်ငြိမ်ပါ။ လိုင်းပြန်စစ်ဆေးပြီး ထပ်မံကြိုးစားပေးပါ။'
+      'အင်တာနက်ချိတ်ဆက်မှု မတည်ငြိမ်ပါ။ လိုင်းပြန်စစ်ဆေးပြီး ထပ်မံကြိုးစားပေးပါ။',
+      normalizedFirebaseCode
     );
   }
 
   if (
-    errCode === 'permission-denied' ||
+    normalizedFirebaseCode === 'unauthenticated' ||
+    normalizedFirebaseCode === 'auth/user-token-expired' ||
+    normalizedFirebaseCode === 'auth/invalid-user-token'
+  ) {
+    logSafeRoomDiagnostic('AUTH_REQUIRED');
+    return new RoomJoinError(
+      'AUTH_REQUIRED',
+      'အကောင့်ဝင်ရောက်ထားခြင်း သက်တမ်းကုန်နေပါသည်။ ကျေးဇူးပြု၍ အကောင့်ပြန်လည်ဝင်ရောက်ပေးပါ။',
+      normalizedFirebaseCode
+    );
+  }
+
+  if (
+    normalizedFirebaseCode === 'permission-denied' ||
     lowerMsg.includes('missing or insufficient permissions')
   ) {
-    console.warn('Room permission notice:', {
-      operation,
-      path: roomPath,
-      code: errCode || 'permission-denied',
-      uid: auth.currentUser?.uid ?? null,
-    });
+    logSafeRoomDiagnostic('PERMISSION_DENIED');
     return new RoomJoinError(
       'PERMISSION_DENIED',
       operation === 'create'
         ? 'အခန်းဖန်တီးရန် ခွင့်ပြုချက် စစ်ဆေးရာတွင် အဆင်မပြေဖြစ်သွားပါသည်။ အကောင့်ပြန်စစ်ဆေးပြီး ထပ်မံကြိုးစားပေးပါ။'
-        : 'အခန်းခွင့်ပြုချက် စစ်ဆေးရာတွင် အဆင်မပြေဖြစ်သွားပါသည်။ အကောင့်ပြန်စစ်ဆေးပြီး ထပ်မံကြိုးစားပေးပါ။'
+        : 'အခန်းခွင့်ပြုချက် စစ်ဆေးရာတွင် အဆင်မပြေဖြစ်သွားပါသည်။ အကောင့်ပြန်စစ်ဆေးပြီး ထပ်မံကြိုးစားပေးပါ။',
+      normalizedFirebaseCode === 'unknown' ? 'permission-denied' : normalizedFirebaseCode
     );
   }
 
-  // Log diagnostic info for unexpected Firestore issues without throwing raw JSON to UI
-  console.warn('Room operation diagnostic notice:', {
-    operation,
-    path: roomPath,
-    code: errCode,
-    message: errMsg,
-    uid: auth.currentUser?.uid,
-  });
+  if (normalizedFirebaseCode === 'failed-precondition') {
+    logSafeRoomDiagnostic('FAILED_PRECONDITION');
+    return new RoomJoinError(
+      'FAILED_PRECONDITION',
+      'အခန်းအခြေအနေ သတ်မှတ်ချက် ပြောင်းလဲသွားသောကြောင့် လုပ်ဆောင်၍ မရပါ။ ထပ်မံကြိုးစားပေးပါ။',
+      normalizedFirebaseCode
+    );
+  }
+
+  if (normalizedFirebaseCode === 'aborted') {
+    logSafeRoomDiagnostic('TRANSACTION_CONFLICT');
+    return new RoomJoinError(
+      'TRANSACTION_CONFLICT',
+      'တစ်ပြိုင်နက်တည်း ဝင်ရောက်မှုများနေသောကြောင့် ခဏစောင့်ပြီး ထပ်မံကြိုးစားပေးပါ။',
+      normalizedFirebaseCode
+    );
+  }
+
+  if (normalizedFirebaseCode === 'resource-exhausted') {
+    logSafeRoomDiagnostic('QUOTA_EXCEEDED');
+    return new RoomJoinError(
+      'QUOTA_EXCEEDED',
+      'လက်ရှိတွင် ဆာဗာအသုံးပြုမှု များပြားနေပါသည်။ ခဏစောင့်ပြီး ထပ်မံကြိုးစားပေးပါ။',
+      normalizedFirebaseCode
+    );
+  }
+
+  if (normalizedFirebaseCode === 'invalid-argument') {
+    logSafeRoomDiagnostic('INVALID_PAYLOAD');
+    return new RoomJoinError(
+      'INVALID_PAYLOAD',
+      operation === 'create'
+        ? 'အခန်းအချက်အလက် ပုံစံမမှန်ကန်သောကြောင့် အခန်းဖန်တီး၍ မရပါ။'
+        : 'အခန်းအချက်အလက် ပုံစံမမှန်ကန်သောကြောင့် ဝင်ရောက်၍ မရပါ။',
+      normalizedFirebaseCode
+    );
+  }
+
+  logSafeRoomDiagnostic('UNKNOWN_ERROR');
 
   return new RoomJoinError(
     'UNKNOWN_ERROR',
     operation === 'create'
       ? 'အခန်းအသစ် ဖန်တီးရာတွင် အဆင်မပြေဖြစ်သွားပါသည်။ ခဏစောင့်ပြီး ပြန်လည်ကြိုးစားပေးပါ။'
-      : 'အခန်းသို့ ဝင်ရောက်ရာတွင် အဆင်မပြေဖြစ်သွားပါသည်။ ခဏစောင့်ပြီး ပြန်လည်ကြိုးစားပေးပါ။'
+      : 'အခန်းသို့ ဝင်ရောက်ရာတွင် အဆင်မပြေဖြစ်သွားပါသည်။ ခဏစောင့်ပြီး ပြန်လည်ကြိုးစားပေးပါ။',
+    normalizedFirebaseCode
   );
 }
+
+const classifyJoinError = classifyRoomOperationError;
 
 export interface ResolvedCreateRoomConfig {
   gameType: RegisteredGameId;
@@ -762,7 +834,7 @@ export async function reconnectPlayerToRoom(roomId: string, userId: string) {
       transaction.update(roomRef, updates);
     });
   } catch (error) {
-    console.warn('Reconnect update notice:', error);
+    console.warn('Reconnect update notice:', { firebaseCode: extractFirebaseErrorCode(error) });
   }
 }
 
@@ -836,7 +908,7 @@ export async function markPlayerDisconnected(roomId: string, userId: string) {
       });
     });
   } catch (error) {
-    console.warn('Mark disconnected error:', error);
+    console.warn('Mark disconnected notice:', { firebaseCode: extractFirebaseErrorCode(error) });
   }
 }
 
@@ -877,7 +949,7 @@ export async function handleReconnectionTimeout(roomId: string) {
       });
     });
   } catch (error) {
-    console.warn('Reconnection timeout error:', error);
+    console.warn('Reconnection timeout notice:', { firebaseCode: extractFirebaseErrorCode(error) });
   }
 }
 
@@ -916,7 +988,7 @@ export async function handleTurnTimeout(roomId: string) {
       });
     });
   } catch (error) {
-    console.warn('Turn timeout skip notice:', error);
+    console.warn('Turn timeout skip notice:', { firebaseCode: extractFirebaseErrorCode(error) });
   }
 }
 

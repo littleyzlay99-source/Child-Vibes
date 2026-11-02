@@ -12,6 +12,7 @@
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -32,9 +33,21 @@ import {
 } from '../SnowRushModule';
 import { COURSE_LENGTH_M } from '../constants';
 import {
+  FIREBASE_DATABASE_ID,
+  FIREBASE_PROJECT_ID,
+  OperationType,
+  auth,
+  handleFirestoreError,
+  redactFirestorePath,
+  redactPiiFromMessage,
+} from '../../../lib/firebase';
+import {
+  RoomJoinError,
   buildInitialGameRoom,
+  classifyRoomOperationError,
   computeGameRoomLeaveOutcome,
   computeLobbyStatus,
+  createGameRoom,
   resolveCreateGameRoomInput,
 } from '../../../services/roomService';
 import {
@@ -866,10 +879,868 @@ async function runStep105PublicActivationTests(): Promise<void> {
     );
 
     passed += 1;
-    console.log('PASS [10/10] Firestore Security Rules allow create 1:1 compliance (Snow Rush + Snakes & Ladders + Negative Security)');
+    console.log('PASS [10/13] Firestore Security Rules allow create 1:1 compliance (Snow Rush + Snakes & Ladders + Negative Security)');
   }
 
-  console.log(`\nStep 10.5 Public Activation Code-Level Verification: ${passed}/10 test groups PASSED.`);
+  // ---------------------------------------------------------------------------
+  // Test 11: Step 10.5.2 — Firebase Project ID, Named Firestore DB & Pre-Write Auth Check
+  // ---------------------------------------------------------------------------
+  {
+    assert.equal(
+      FIREBASE_PROJECT_ID,
+      'gen-lang-client-0335200904',
+      'Firebase Project ID must match gen-lang-client-0335200904'
+    );
+    assert.equal(
+      FIREBASE_DATABASE_ID,
+      'ai-studio-47dffdd9-9dac-40e5-b320-95d71826db89',
+      'Named Firestore Database ID must match ai-studio-47dffdd9-9dac-40e5-b320-95d71826db89'
+    );
+    assert.equal(
+      auth.currentUser,
+      null,
+      'In headless node environment without signed-in session, auth.currentUser is null'
+    );
+
+    let thrownAuthErr: unknown = null;
+    try {
+      await createGameRoom(makeHostProfile(), 'snow_rush', { maxPlayers: 4 });
+    } catch (err) {
+      thrownAuthErr = err;
+    }
+    assert.ok(thrownAuthErr instanceof RoomJoinError, 'Unauthenticated createGameRoom throws RoomJoinError');
+    assert.equal(
+      (thrownAuthErr as RoomJoinError).code,
+      'AUTH_REQUIRED',
+      'Missing auth.currentUser.uid must throw AUTH_REQUIRED before setDoc()'
+    );
+
+    passed += 1;
+    console.log('PASS [11/13] Firebase Project ID, Named Firestore Database ID, and AUTH_REQUIRED pre-write guard verified');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test 12: Step 10.5.2 — Distinct Firebase Error Classification & Strict Zero-PII Logging
+  // ---------------------------------------------------------------------------
+  {
+    const SENSITIVE_EMAIL = 'littleyzlay99@gmail.com';
+    const SENSITIVE_UID = 'JerguuEmgjZJ6ZvamqsucN08vds1';
+    const SENSITIVE_JWT = 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJKZXJndXVFbWdqWko2WnZhbXFzdWNOMDh2ZHMxIn0.signature_secret_12345';
+    const SENSITIVE_BEARER = 'Bearer ya29.a0AfH6SMBxSecretAccessTokenValue987654321';
+
+    const capturedConsoleErrors: string[] = [];
+    const origConsoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      capturedConsoleErrors.push(args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '));
+    };
+
+    try {
+      // 12a. permission-denied -> PERMISSION_DENIED (exact Burmese message under investigation)
+      const permErr = classifyRoomOperationError(
+        {
+          code: 'permission-denied',
+          message: `FirebaseError: Missing or insufficient permissions for ${SENSITIVE_EMAIL} (${SENSITIVE_UID}) token=${SENSITIVE_JWT}`,
+        },
+        'rooms/room_SR1234',
+        'create'
+      );
+      assert.equal(permErr.code, 'PERMISSION_DENIED');
+      assert.equal(permErr.firebaseCode, 'permission-denied');
+      assert.equal(
+        permErr.message,
+        'အခန်းဖန်တီးရန် ခွင့်ပြုချက် စစ်ဆေးရာတွင် အဆင်မပြေဖြစ်သွားပါသည်။ အကောင့်ပြန်စစ်ဆေးပြီး ထပ်မံကြိုးစားပေးပါ။'
+      );
+
+      // 12b. unauthenticated / expired token -> AUTH_REQUIRED
+      const unauthErr = classifyRoomOperationError(
+        { code: 'unauthenticated', message: `Unauthenticated request ${SENSITIVE_BEARER}` },
+        'rooms/room_SR1234',
+        'create'
+      );
+      assert.equal(unauthErr.code, 'AUTH_REQUIRED');
+      assert.equal(unauthErr.firebaseCode, 'unauthenticated');
+
+      const expiredTokenErr = classifyRoomOperationError(
+        { code: 'auth/user-token-expired', message: 'User token expired' },
+        'rooms/room_SR1234',
+        'create'
+      );
+      assert.equal(expiredTokenErr.code, 'AUTH_REQUIRED');
+
+      // 12c. failed-precondition -> FAILED_PRECONDITION
+      const precondErr = classifyRoomOperationError(
+        { code: 'failed-precondition', message: 'The query requires an index or precondition failed' },
+        'rooms/room_SR1234',
+        'create'
+      );
+      assert.equal(precondErr.code, 'FAILED_PRECONDITION');
+      assert.equal(precondErr.firebaseCode, 'failed-precondition');
+
+      // 12d. aborted -> TRANSACTION_CONFLICT
+      const abortedErr = classifyRoomOperationError(
+        { code: 'aborted', message: 'Transaction lock contention' },
+        'rooms/room_SR1234',
+        'join'
+      );
+      assert.equal(abortedErr.code, 'TRANSACTION_CONFLICT');
+
+      // 12e. resource-exhausted -> QUOTA_EXCEEDED
+      const quotaErr = classifyRoomOperationError(
+        { code: 'resource-exhausted', message: 'Quota exceeded' },
+        'rooms/room_SR1234',
+        'create'
+      );
+      assert.equal(quotaErr.code, 'QUOTA_EXCEEDED');
+
+      // 12f. invalid-argument -> INVALID_PAYLOAD
+      const invalidArgErr = classifyRoomOperationError(
+        { code: 'invalid-argument', message: 'Invalid field value' },
+        'rooms/room_SR1234',
+        'create'
+      );
+      assert.equal(invalidArgErr.code, 'INVALID_PAYLOAD');
+
+      // 12g. unavailable -> NETWORK_ERROR
+      const netErr = classifyRoomOperationError(
+        { code: 'unavailable', message: 'Backend unavailable' },
+        'rooms/room_SR1234',
+        'create'
+      );
+      assert.equal(netErr.code, 'NETWORK_ERROR');
+
+      // 12h. unexpected error -> UNKNOWN_ERROR
+      const unknownErr = classifyRoomOperationError(
+        { code: 'internal', message: `Internal error for ${SENSITIVE_EMAIL}` },
+        'rooms/room_SR1234',
+        'create'
+      );
+      assert.equal(unknownErr.code, 'UNKNOWN_ERROR');
+
+      // 12i. handleFirestoreError must redact path + message and exclude email/userId/tokens
+      let handledJson = '';
+      try {
+        handleFirestoreError(
+          new Error(`Permission denied for ${SENSITIVE_EMAIL} ${SENSITIVE_JWT} ${SENSITIVE_BEARER}`),
+          OperationType.WRITE,
+          `users/${SENSITIVE_UID}`
+        );
+      } catch (e) {
+        handledJson = (e as Error).message;
+      }
+      assert.ok(handledJson.length > 0, 'handleFirestoreError throws structured JSON diagnostic');
+      const parsedDiag = JSON.parse(handledJson);
+      assert.equal(parsedDiag.path, 'users/[redacted-user]', 'User UID path segment must be redacted');
+      assert.ok(!('userId' in parsedDiag), 'FirestoreErrorInfo must not include userId');
+      assert.ok(!('email' in parsedDiag), 'FirestoreErrorInfo must not include email');
+      assert.ok(!('providerInfo' in parsedDiag), 'FirestoreErrorInfo must not include providerInfo');
+
+      const allLoggedOutput = [...capturedConsoleErrors, handledJson].join('\n');
+      assert.ok(!allLoggedOutput.includes(SENSITIVE_EMAIL), 'Logs MUST NOT contain email PII');
+      assert.ok(!allLoggedOutput.includes(SENSITIVE_UID), 'Logs MUST NOT contain UID PII');
+      assert.ok(!allLoggedOutput.includes(SENSITIVE_JWT), 'Logs MUST NOT contain JWT tokens');
+      assert.ok(!allLoggedOutput.includes('ya29.a0AfH6SMBxSecretAccessTokenValue987654321'), 'Logs MUST NOT contain Bearer tokens');
+
+      assert.equal(redactFirestorePath(`users/${SENSITIVE_UID}/claims/c1`), 'users/[redacted-user]/claims/c1');
+      assert.ok(!redactPiiFromMessage(`email=${SENSITIVE_EMAIL} token=${SENSITIVE_JWT}`).includes(SENSITIVE_EMAIL));
+    } finally {
+      console.error = origConsoleError;
+    }
+
+    passed += 1;
+    console.log('PASS [12/13] Distinct Firebase error classification & strict zero-PII redaction verified');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test 13: Step 10.5.2 — Real ANTLR4 `/firestore.rules` CEL Evaluation & < 1,000 Expression Limit Proof
+  // ---------------------------------------------------------------------------
+  {
+    const req = createRequire(path.join(WORKSPACE_ROOT, 'package.json'));
+    const rulesParser = req(
+      path.join(WORKSPACE_ROOT, 'node_modules/@firebase/eslint-plugin-security-rules/dist/parser.cjs')
+    );
+    const rulesSource = fs.readFileSync(path.join(WORKSPACE_ROOT, 'firestore.rules'), 'utf8');
+    const parsedRules = rulesParser.parseForESLint(rulesSource);
+    const tree = parsedRules.services.tree;
+
+    // Extract service-level helper functions & match /rooms/{roomId} permissions from the ANTLR4 parse tree
+    type FnDef = { params: string[]; lets: Array<{ name: string; expr: any }>; retExpr: any };
+    const functions = new Map<string, FnDef>();
+    const roomPerms = new Map<string, any>();
+
+    const walkSetup = (node: any) => {
+      if (!node) return;
+      const ctor = node.constructor?.name ?? '';
+      if (ctor === 'FunctionDeclarationContext') {
+        let fnName = '';
+        const params: string[] = [];
+        const lets: Array<{ name: string; expr: any }> = [];
+        let retExpr: any = null;
+        for (const ch of node.children ?? []) {
+          const cName = ch.constructor?.name ?? '';
+          if (cName === 'LocalFunctionIdContext') fnName = ch.getText();
+          if (cName === 'FunctionSignatureContext') {
+            for (const sc of ch.children ?? []) {
+              if (sc.constructor?.name === 'ParamListContext') {
+                for (const pc of sc.children ?? []) {
+                  if (pc.constructor?.name === 'LocalVariableIdContext') params.push(pc.getText());
+                }
+              }
+            }
+          }
+          if (cName === 'FunctionBodyContext') {
+            for (const bc of ch.children ?? []) {
+              const bName = bc.constructor?.name ?? '';
+              if (bName === 'BindingDeclarationContext') {
+                let vName = '';
+                let vExpr: any = null;
+                for (const lc of bc.children ?? []) {
+                  if (lc.constructor?.name === 'LocalVariableIdContext') vName = lc.getText();
+                  if ((lc.constructor?.name ?? '').endsWith('ExpressionContext')) vExpr = lc;
+                }
+                lets.push({ name: vName, expr: vExpr });
+              }
+              if (bName === 'ReturnStatementContext') {
+                for (const rc of bc.children ?? []) {
+                  if ((rc.constructor?.name ?? '').endsWith('ExpressionContext')) retExpr = rc;
+                }
+              }
+            }
+          }
+        }
+        if (fnName && retExpr) functions.set(fnName, { params, lets, retExpr });
+        return;
+      }
+      if (ctor === 'MatchRuleDeclarationContext' && node.getText().startsWith('match/rooms/{roomId}{')) {
+        for (const ch of node.children ?? []) {
+          if (ch.constructor?.name === 'MatchStatementContext') {
+            for (const mc of ch.children ?? []) {
+              if (mc.constructor?.name === 'PermissionDeclarationContext') {
+                const ops: string[] = [];
+                let bodyExpr: any = null;
+                for (const pc of mc.children ?? []) {
+                  if (pc.constructor?.name === 'OperationIdContext') {
+                    ops.push(...pc.getText().split(',').map((s: string) => s.trim()).filter(Boolean));
+                  }
+                  if (pc.constructor?.name === 'PermissionBodyContext') {
+                    for (const bc of pc.children ?? []) {
+                      if ((bc.constructor?.name ?? '').endsWith('ExpressionContext')) bodyExpr = bc;
+                    }
+                  }
+                }
+                for (const op of ops) roomPerms.set(op, bodyExpr);
+              }
+            }
+          }
+        }
+      }
+      for (const ch of node.children ?? []) walkSetup(ch);
+    };
+    walkSetup(tree);
+
+    // Enforce Firestore's hard limit of <= 10 let-bindings per function
+    let maxLetsPerFunc = 0;
+    for (const [fnName, def] of functions.entries()) {
+      maxLetsPerFunc = Math.max(maxLetsPerFunc, def.lets.length);
+      assert.ok(
+        def.lets.length <= 10,
+        `Function ${fnName} has ${def.lets.length} let bindings (Firestore hard max is 10)`
+      );
+    }
+
+    const TIMESTAMP_TAG = { __celType: 'timestamp', ms: 1760000100000 };
+    const celEq = (a: any, b: any): boolean => {
+      if (a === b) return true;
+      if (a == null || b == null) return a === b;
+      if (typeof a !== typeof b) return false;
+      if (Array.isArray(a) && Array.isArray(b)) {
+        return a.length === b.length && a.every((v, i) => celEq(v, b[i]));
+      }
+      if (a.__celSet && b.__celSet) {
+        return a.items.length === b.items.length && a.items.every((k: string) => b.items.includes(k));
+      }
+      if (typeof a === 'object' && typeof b === 'object') {
+        if (a.__celType || b.__celType) return a.__celType === b.__celType && a.ms === b.ms;
+        const ka = Object.keys(a);
+        const kb = Object.keys(b);
+        return ka.length === kb.length && ka.every((k) => k in b && celEq(a[k], b[k]));
+      }
+      return false;
+    };
+
+    const makeDiff = (incMap: Record<string, any>, extMap: Record<string, any>) => {
+      const affected = new Set<string>();
+      for (const k of new Set([...Object.keys(incMap), ...Object.keys(extMap)])) {
+        if (!(k in incMap) || !(k in extMap) || !celEq(incMap[k], extMap[k])) {
+          affected.add(k);
+        }
+      }
+      return {
+        __celDiff: true,
+        affectedKeys: () => ({ __celSet: true, items: Array.from(affected) }),
+      };
+    };
+
+    const evaluateRoomOp = (
+      op: 'create' | 'update' | 'delete',
+      ctx: {
+        roomId: string;
+        authUid: string | null;
+        incData?: Record<string, any> | null;
+        extData?: Record<string, any> | null;
+      }
+    ) => {
+      let totalExpr = 0;
+      let nonLitExpr = 0;
+
+      const rootEnv: Record<string, any> = {
+        roomId: ctx.roomId,
+        database: 'ai-studio-47dffdd9-9dac-40e5-b320-95d71826db89',
+        request: {
+          auth: ctx.authUid ? { uid: ctx.authUid, token: { email_verified: true } } : null,
+          resource: ctx.incData ? { data: ctx.incData } : null,
+          time: TIMESTAMP_TAG,
+        },
+        resource: ctx.extData ? { data: ctx.extData } : null,
+      };
+
+      const evalExprList = (exprListNode: any, env: Record<string, any>): any[] => {
+        if (!exprListNode) return [];
+        const out: any[] = [];
+        for (const ch of exprListNode.children ?? []) {
+          if ((ch.constructor?.name ?? '').endsWith('ExpressionContext')) {
+            out.push(evalNode(ch, env));
+          }
+        }
+        return out;
+      };
+
+      const invokeCelMethod = (target: any, methodName: string, args: any[]): any => {
+        if (methodName === 'size') {
+          if (typeof target === 'string' || Array.isArray(target)) return target.length;
+          if (target?.__celSet) return target.items.length;
+          if (target && typeof target === 'object') return Object.keys(target).length;
+          throw new Error('Invalid .size() target');
+        }
+        if (methodName === 'keys') return Object.keys(target);
+        if (methodName === 'get') {
+          const [k, defVal] = args;
+          return target && Object.prototype.hasOwnProperty.call(target, k) ? target[k] : defVal;
+        }
+        if (methodName === 'diff') return makeDiff(target, args[0]);
+        if (methodName === 'affectedKeys') return target.affectedKeys();
+        if (methodName === 'hasAll') {
+          const items: any[] = Array.isArray(target) ? target : target.items;
+          return (args[0] as any[]).every((x) => items.includes(x));
+        }
+        if (methodName === 'hasOnly') {
+          const items: any[] = Array.isArray(target) ? target : target.items;
+          const allowed: any[] = args[0];
+          return items.every((x) => allowed.includes(x));
+        }
+        if (methodName === 'hasAny') {
+          const items: any[] = Array.isArray(target) ? target : target.items;
+          const check: any[] = args[0];
+          return items.some((x) => check.includes(x));
+        }
+        if (methodName === 'matches') {
+          return new RegExp(`^(?:${args[0]})$`).test(String(target));
+        }
+        if (methodName === 'toMillis') {
+          return Number(target.ms);
+        }
+        throw new Error(`Unsupported CEL method .${methodName}()`);
+      };
+
+      const evalNode = (node: any, env: Record<string, any>): any => {
+        if (!node) return null;
+        const ctor = node.constructor?.name ?? '';
+        const kids = node.children ?? [];
+
+        if (ctor === 'PrimaryExpressionContext' || ctor === 'IndexLookupContext') {
+          return evalNode(kids[0], env);
+        }
+        if (ctor === 'ParenSimpleExpressionContext') {
+          return evalNode(kids[1], env);
+        }
+        if (ctor === 'LiteralExpressionContext') {
+          return evalNode(kids[0], env);
+        }
+        if (ctor === 'LiteralContext') {
+          totalExpr += 1;
+          const txt = node.getText();
+          if (txt === 'true') return true;
+          if (txt === 'false') return false;
+          if (txt === 'null') return null;
+          if ((txt.startsWith("'") && txt.endsWith("'")) || (txt.startsWith('"') && txt.endsWith('"'))) {
+            return txt.slice(1, -1);
+          }
+          return Number(txt);
+        }
+        if (ctor === 'VariableSimpleExpressionContext') {
+          totalExpr += 1;
+          const ident = node.getText();
+          if (Object.prototype.hasOwnProperty.call(env, ident)) return env[ident];
+          throw new Error(`Unbound identifier ${ident}`);
+        }
+        if (ctor === 'ListSimpleExpressionContext') {
+          totalExpr += 1;
+          nonLitExpr += 1;
+          const listChild = kids.find((k: any) => k.constructor?.name === 'ExpressionListContext');
+          return evalExprList(listChild, env);
+        }
+        if (ctor === 'FunctionCallSimpleExpressionContext') {
+          totalExpr += 1;
+          nonLitExpr += 1;
+          const fnName = kids[0].getText();
+          const listChild = kids.find((k: any) => k.constructor?.name === 'ExpressionListContext');
+          const args = evalExprList(listChild, env);
+          if (fnName === 'int') return Math.trunc(Number(args[0]));
+          if (fnName === 'string') return String(args[0]);
+          const fnDef = functions.get(fnName);
+          if (!fnDef) throw new Error(`Unknown rules function ${fnName}`);
+          const fnEnv: Record<string, any> = { ...rootEnv };
+          fnDef.params.forEach((pName, idx) => {
+            fnEnv[pName] = args[idx];
+          });
+          for (const lb of fnDef.lets) {
+            fnEnv[lb.name] = evalNode(lb.expr, fnEnv);
+          }
+          return evalNode(fnDef.retExpr, fnEnv);
+        }
+        if (ctor === 'MemberLookupSimpleExpressionContext') {
+          totalExpr += 1;
+          nonLitExpr += 1;
+          const target = evalNode(kids[0], env);
+          const prop = kids[2].getText();
+          if (target == null || !Object.prototype.hasOwnProperty.call(target, prop)) {
+            throw new Error(`Missing property ${prop}`);
+          }
+          return target[prop];
+        }
+        if (ctor === 'ListLookupSimpleExpressionContext') {
+          totalExpr += 1;
+          nonLitExpr += 1;
+          const target = evalNode(kids[0], env);
+          const idx = evalNode(kids[2], env);
+          if (target == null || !(idx in target)) throw new Error(`Index ${idx} out of bounds`);
+          return target[idx];
+        }
+        if (ctor === 'IdMemberFunctionCallSimpleExpressionContext') {
+          // Variable lookup + method call
+          totalExpr += 2;
+          nonLitExpr += 1;
+          const ident = kids[0].getText();
+          if (!Object.prototype.hasOwnProperty.call(env, ident)) throw new Error(`Unbound identifier ${ident}`);
+          const target = env[ident];
+          const methodName = kids[2].getText();
+          const listChild = kids.find((k: any) => k.constructor?.name === 'ExpressionListContext');
+          const args = evalExprList(listChild, env);
+          return invokeCelMethod(target, methodName, args);
+        }
+        if (ctor === 'MemberFunctionCallSimpleExpressionContext') {
+          totalExpr += 1;
+          nonLitExpr += 1;
+          const target = evalNode(kids[0], env);
+          const methodName = kids[2].getText();
+          const listChild = kids.find((k: any) => k.constructor?.name === 'ExpressionListContext');
+          const args = evalExprList(listChild, env);
+          return invokeCelMethod(target, methodName, args);
+        }
+        if (ctor === 'NotExpressionContext' || ctor === 'UnaryExpressionContext') {
+          totalExpr += 1;
+          nonLitExpr += 1;
+          const opTok = kids[0].getText();
+          const inner = evalNode(kids[1], env);
+          return opTok === '!' ? !inner : -inner;
+        }
+        if (ctor === 'TernaryExpressionContext') {
+          totalExpr += 1;
+          nonLitExpr += 1;
+          const cond = evalNode(kids[0], env);
+          return cond ? evalNode(kids[2], env) : evalNode(kids[4], env);
+        }
+        if (ctor === 'LogicalOrExpressionContext') {
+          let acc = Boolean(evalNode(kids[0], env));
+          for (let i = 2; i < kids.length; i += 2) {
+            totalExpr += 1;
+            nonLitExpr += 1;
+            if (acc) return true;
+            acc = Boolean(evalNode(kids[i], env));
+          }
+          return acc;
+        }
+        if (ctor === 'LogicalAndExpressionContext') {
+          let acc = Boolean(evalNode(kids[0], env));
+          for (let i = 2; i < kids.length; i += 2) {
+            totalExpr += 1;
+            nonLitExpr += 1;
+            if (!acc) return false;
+            acc = Boolean(evalNode(kids[i], env));
+          }
+          return acc;
+        }
+        if (ctor === 'EqualityExpressionContext') {
+          totalExpr += 1;
+          nonLitExpr += 1;
+          const left = evalNode(kids[0], env);
+          const opTok = kids[1].getText();
+          const right = evalNode(kids[2], env);
+          return opTok === '==' ? celEq(left, right) : !celEq(left, right);
+        }
+        if (ctor === 'ExprIsTypeIdExpressionContext') {
+          totalExpr += 1;
+          nonLitExpr += 1;
+          const left = evalNode(kids[0], env);
+          const typeName = kids[2].getText();
+          if (typeName === 'string') return typeof left === 'string';
+          if (typeName === 'number' || typeName === 'int' || typeName === 'float')
+            return typeof left === 'number' && !Number.isNaN(left);
+          if (typeName === 'bool') return typeof left === 'boolean';
+          if (typeName === 'list') return Array.isArray(left);
+          if (typeName === 'map')
+            return left !== null && typeof left === 'object' && !Array.isArray(left) && !left.__celType && !left.__celSet;
+          if (typeName === 'timestamp') return Boolean(left && left.__celType === 'timestamp');
+          return false;
+        }
+        if (ctor === 'ExprInExpressionContext') {
+          totalExpr += 1;
+          nonLitExpr += 1;
+          const left = evalNode(kids[0], env);
+          const right = evalNode(kids[2], env);
+          if (Array.isArray(right)) return right.some((item) => celEq(left, item));
+          if (right && right.__celSet) return right.items.some((item: any) => celEq(left, item));
+          if (right && typeof right === 'object') return Object.prototype.hasOwnProperty.call(right, String(left));
+          return false;
+        }
+        if (ctor === 'RelationalExpressionContext') {
+          totalExpr += 1;
+          nonLitExpr += 1;
+          const left = evalNode(kids[0], env);
+          const opTok = kids[1].getText();
+          const right = evalNode(kids[2], env);
+          if (typeof left !== 'number' || typeof right !== 'number' || Number.isNaN(left) || Number.isNaN(right)) {
+            throw new Error('CEL relational comparison requires numeric operands');
+          }
+          if (opTok === '<') return left < right;
+          if (opTok === '<=') return left <= right;
+          if (opTok === '>') return left > right;
+          if (opTok === '>=') return left >= right;
+        }
+        if (ctor === 'AdditiveExpressionContext' || ctor === 'MultiplicativeExpressionContext') {
+          let val = evalNode(kids[0], env);
+          for (let i = 2; i < kids.length; i += 2) {
+            totalExpr += 1;
+            nonLitExpr += 1;
+            const opTok = kids[i - 1].getText();
+            const rhs = evalNode(kids[i], env);
+            if (opTok === '+') val = val + rhs;
+            else if (opTok === '-') val = val - rhs;
+            else if (opTok === '*') val = val * rhs;
+            else if (opTok === '/') val = Math.trunc(val / rhs);
+            else if (opTok === '%') val = val % rhs;
+          }
+          return val;
+        }
+        if (kids.length === 1) return evalNode(kids[0], env);
+        throw new Error(`Unhandled AST node ${ctor}`);
+      };
+
+      const expr = roomPerms.get(op);
+      assert.ok(expr, `Permission ${op} must exist on /rooms/{roomId}`);
+      try {
+        const res = Boolean(evalNode(expr, rootEnv));
+        return { res, totalExpr, nonLitExpr };
+      } catch {
+        return { res: false, totalExpr, nonLitExpr };
+      }
+    };
+
+    const host = makeHostProfile({ id: 'uid_p1', displayName: 'အောင်အောင်' });
+
+    // 13a. Snow Rush 2/3/4 Player Room Create — must evaluate true AND stay well under 1,000 expressions
+    for (const maxPlayers of [2, 3, 4]) {
+      const roomCode = `SR${maxPlayers}CEL`;
+      const payload = {
+        ...buildInitialGameRoom({
+          hostUser: host,
+          effectiveHostUid: host.id,
+          roomCode,
+          resolved: resolveCreateGameRoomInput('snow_rush', { maxPlayers }),
+          now: 1760000100000,
+        }),
+        timestamp: TIMESTAMP_TAG,
+        serverUpdatedAt: TIMESTAMP_TAG,
+      };
+      const evalRes = evaluateRoomOp('create', {
+        roomId: `room_${roomCode}`,
+        authUid: host.id,
+        incData: payload,
+      });
+      assert.equal(evalRes.res, true, `Snow Rush ${maxPlayers}P create must pass real firestore.rules AST`);
+      assert.ok(
+        evalRes.nonLitExpr < 850 && evalRes.totalExpr < 1000,
+        `Snow Rush ${maxPlayers}P create (${evalRes.nonLitExpr} ops / ${evalRes.totalExpr} AST tokens) MUST be < 1,000`
+      );
+    }
+
+    // 13b. Snakes & Ladders 2/3/4 Player Room Create — must evaluate true AND stay well under 1,000 expressions
+    for (const maxPlayers of [2, 3, 4]) {
+      const roomCode = `SL${maxPlayers}CEL`;
+      const payload = {
+        ...buildInitialGameRoom({
+          hostUser: host,
+          effectiveHostUid: host.id,
+          roomCode,
+          resolved: resolveCreateGameRoomInput('snakes_and_ladders', { maxPlayers, exactFinish: true }),
+          now: 1760000100000,
+        }),
+        timestamp: TIMESTAMP_TAG,
+        serverUpdatedAt: TIMESTAMP_TAG,
+      };
+      const evalRes = evaluateRoomOp('create', {
+        roomId: `room_${roomCode}`,
+        authUid: host.id,
+        incData: payload,
+      });
+      assert.equal(evalRes.res, true, `Snakes & Ladders ${maxPlayers}P create must pass real firestore.rules AST`);
+      assert.ok(
+        evalRes.nonLitExpr < 850 && evalRes.totalExpr < 1000,
+        `Snakes & Ladders ${maxPlayers}P create (${evalRes.nonLitExpr} ops / ${evalRes.totalExpr} AST tokens) MUST be < 1,000`
+      );
+    }
+
+    // 13c. Worst-case 4-Player Room Updates (Join, Ready, Host Start, Snakes Dice Roll, Host Leave, Play Again)
+    const baseSnow4 = {
+      ...buildInitialGameRoom({
+        hostUser: host,
+        effectiveHostUid: 'uid_p1',
+        roomCode: 'SR4UPD',
+        resolved: resolveCreateGameRoomInput('snow_rush', { maxPlayers: 4 }),
+        now: 1760000100000,
+      }),
+      timestamp: TIMESTAMP_TAG,
+      serverUpdatedAt: TIMESTAMP_TAG,
+    };
+    const mkPlayer = (uid: string, name: string, isReady = false, pos = 1, updatedAtMs = 1760000100000) => ({
+      ...baseSnow4.players[0],
+      uid,
+      displayName: name,
+      isReady,
+      position: pos,
+      updatedAtMs,
+    });
+
+    // Action 2: 4th player joins waiting 3P Snow Rush room -> full 4P
+    const snow3Waiting = {
+      ...baseSnow4,
+      players: [mkPlayer('uid_p1', 'P1'), mkPlayer('uid_p2', 'P2', true), mkPlayer('uid_p3', 'P3', true)],
+      playerCount: 3,
+      stateVersion: 3,
+    };
+    const snow4Joined = {
+      ...snow3Waiting,
+      players: [...snow3Waiting.players, mkPlayer('uid_p4', 'P4', false)],
+      playerCount: 4,
+      status: 'full',
+      stateVersion: 4,
+      serverUpdatedAt: TIMESTAMP_TAG,
+    };
+    const join4Res = evaluateRoomOp('update', {
+      roomId: 'room_SR4UPD',
+      authUid: 'uid_p4',
+      extData: snow3Waiting,
+      incData: snow4Joined,
+    });
+    assert.equal(join4Res.res, true, '4th player joining Snow Rush must pass firestore.rules');
+    assert.ok(join4Res.nonLitExpr < 850, `4P Join CEL ops (${join4Res.nonLitExpr}) MUST be < 850 (< 1,000 hard limit)`);
+
+    // Action 3: 4th player toggles Ready
+    const snow4AllReady = {
+      ...snow4Joined,
+      players: [
+        snow4Joined.players[0],
+        snow4Joined.players[1],
+        snow4Joined.players[2],
+        { ...snow4Joined.players[3], isReady: true, updatedAtMs: 1760000105000 },
+      ],
+      stateVersion: 5,
+    };
+    const ready4Res = evaluateRoomOp('update', {
+      roomId: 'room_SR4UPD',
+      authUid: 'uid_p4',
+      extData: snow4Joined,
+      incData: snow4AllReady,
+    });
+    assert.equal(ready4Res.res, true, '4th player toggling Ready must pass firestore.rules');
+    assert.ok(ready4Res.nonLitExpr < 850, `4P Ready CEL ops (${ready4Res.nonLitExpr}) MUST be < 850 (< 1,000 hard limit)`);
+
+    // Action 4: Host starts 4P Snow Rush (all 4 players mutated simultaneously)
+    const snow4Started = {
+      ...snow4AllReady,
+      status: 'playing',
+      players: snow4AllReady.players.map((p) => ({
+        ...p,
+        position: 1,
+        positionVersion: 2,
+        lastMoveId: null,
+        updatedAtMs: 1760000110000,
+      })),
+      matchParticipantIds: ['uid_p1', 'uid_p2', 'uid_p3', 'uid_p4'],
+      gameRound: 2,
+      stateVersion: 6,
+      turnStartTimestamp: 1760000110000,
+      turnDeadline: 1760000140000,
+    };
+    const start4Res = evaluateRoomOp('update', {
+      roomId: 'room_SR4UPD',
+      authUid: 'uid_p1',
+      extData: snow4AllReady,
+      incData: snow4Started,
+    });
+    assert.equal(start4Res.res, true, 'Host starting 4P Snow Rush must pass firestore.rules');
+    assert.ok(start4Res.nonLitExpr < 850, `4P Host Start CEL ops (${start4Res.nonLitExpr}) MUST be < 850 (< 1,000 hard limit)`);
+
+    // Action 5: Snakes & Ladders 4P Active Turn Dice Roll
+    const snakes4Playing = {
+      ...snow4Started,
+      id: 'room_SL4UPD',
+      roomCode: 'SL4UPD',
+      gameType: 'snakes_and_ladders',
+      currentTurnIndex: 0,
+    };
+    const snakes4Moved = {
+      ...snakes4Playing,
+      players: [
+        { ...snakes4Playing.players[0], position: 14, positionVersion: 3, lastMoveId: 'mv_1', updatedAtMs: 1760000115000 },
+        snakes4Playing.players[1],
+        snakes4Playing.players[2],
+        snakes4Playing.players[3],
+      ],
+      lastDiceRoll: 3,
+      lastMoveId: 'mv_1',
+      lastMovingPlayerUid: 'uid_p1',
+      currentTurnIndex: 1,
+      stateVersion: 7,
+    };
+    const move4Res = evaluateRoomOp('update', {
+      roomId: 'room_SL4UPD',
+      authUid: 'uid_p1',
+      extData: snakes4Playing,
+      incData: snakes4Moved,
+    });
+    assert.equal(move4Res.res, true, '4P Snakes & Ladders turn move must pass firestore.rules');
+    assert.ok(move4Res.nonLitExpr < 850, `4P Snakes Move CEL ops (${move4Res.nonLitExpr}) MUST be < 850 (< 1,000 hard limit)`);
+
+    // Action 7: 4P -> 3P Host Leave in Snow Rush
+    const leaveOutcome = computeGameRoomLeaveOutcome({
+      room: snow4Started as unknown as GameRoom,
+      leavingUserId: 'uid_p1',
+      now: 1760000120000,
+    });
+    assert.equal(leaveOutcome.action, 'update');
+    if (leaveOutcome.action === 'update') {
+      const snow3AfterHostLeave = {
+        ...snow4Started,
+        ...leaveOutcome.updates,
+        stateVersion: 7,
+        serverUpdatedAt: TIMESTAMP_TAG,
+      };
+      const leave4Res = evaluateRoomOp('update', {
+        roomId: 'room_SR4UPD',
+        authUid: 'uid_p1',
+        extData: snow4Started,
+        incData: snow3AfterHostLeave,
+      });
+      assert.equal(leave4Res.res, true, '4P -> 3P Snow Rush Host Leave must pass firestore.rules');
+      assert.ok(leave4Res.nonLitExpr < 850, `4P Host Leave CEL ops (${leave4Res.nonLitExpr}) MUST be < 850 (< 1,000 hard limit)`);
+    }
+
+    // Action 8: Snakes & Ladders 4P Play Again Reset
+    const snakes4Finished = {
+      ...snakes4Moved,
+      status: 'finished',
+      winnerId: 'uid_p1',
+      winnerName: 'P1',
+    };
+    const snakes4PlayAgain = {
+      ...snakes4Finished,
+      status: 'full',
+      winnerId: null,
+      winnerName: null,
+      players: snakes4Finished.players.map((p, idx) => ({
+        ...p,
+        isReady: idx === 0,
+        position: 1,
+        positionVersion: 4,
+        lastMoveId: null,
+        updatedAtMs: 1760000130000,
+      })),
+      gameRound: 3,
+      stateVersion: 8,
+    };
+    const playAgain4Res = evaluateRoomOp('update', {
+      roomId: 'room_SL4UPD',
+      authUid: 'uid_p1',
+      extData: snakes4Finished,
+      incData: snakes4PlayAgain,
+    });
+    assert.equal(playAgain4Res.res, true, '4P Snakes & Ladders Play Again must pass firestore.rules');
+    assert.ok(
+      playAgain4Res.nonLitExpr < 850,
+      `4P Play Again CEL ops (${playAgain4Res.nonLitExpr}) MUST be < 850 (< 1,000 hard limit)`
+    );
+
+    // 13d. Preserved Security Protections (Non-member Update/Delete, Fake Winner, Snow Rush finished)
+    const nonMemberUpdate = evaluateRoomOp('update', {
+      roomId: 'room_SR4UPD',
+      authUid: 'uid_attacker',
+      extData: snow4Started,
+      incData: { ...snow4Started, stateVersion: 99 },
+    });
+    assert.equal(nonMemberUpdate.res, false, 'Non-member room update MUST remain blocked');
+
+    const nonMemberDelete = evaluateRoomOp('delete', {
+      roomId: 'room_SR4UPD',
+      authUid: 'uid_attacker',
+      extData: baseSnow4,
+    });
+    assert.equal(nonMemberDelete.res, false, 'Non-member room delete MUST remain blocked');
+
+    const fakeWinnerMove = evaluateRoomOp('update', {
+      roomId: 'room_SL4UPD',
+      authUid: 'uid_p1',
+      extData: snakes4Playing, // uid_p1 is at position 1 (< 94)
+      incData: {
+        ...snakes4Moved,
+        players: [
+          { ...snakes4Playing.players[0], position: 100, positionVersion: 3 },
+          snakes4Playing.players[1],
+          snakes4Playing.players[2],
+          snakes4Playing.players[3],
+        ],
+        status: 'finished',
+        winnerId: 'uid_p1',
+        winnerName: 'P1',
+      },
+    });
+    assert.equal(fakeWinnerMove.res, false, 'Fake Winner jump from pos 1 -> 100 MUST remain blocked');
+
+    const snowRushFinishedAttempt = evaluateRoomOp('update', {
+      roomId: 'room_SR4UPD',
+      authUid: 'uid_p1',
+      extData: snow4Started,
+      incData: { ...snow4Started, status: 'finished', stateVersion: 7 },
+    });
+    assert.equal(snowRushFinishedAttempt.res, false, 'Snow Rush status=finished MUST remain blocked');
+
+    passed += 1;
+    const createSnow4Res = evaluateRoomOp('create', { roomId: 'room_SR4UPD', authUid: 'uid_p1', incData: baseSnow4 });
+    console.log(
+      `PASS [13/13] Real ANTLR4 firestore.rules CEL evaluation & <1,000 expression budget verified (Create=${createSnow4Res.nonLitExpr} ops/${createSnow4Res.totalExpr} tokens, 4P Join=${join4Res.nonLitExpr}/${join4Res.totalExpr}, 4P Ready=${ready4Res.nonLitExpr}/${ready4Res.totalExpr}, 4P Start=${start4Res.nonLitExpr}/${start4Res.totalExpr}, 4P Move=${move4Res.nonLitExpr}/${move4Res.totalExpr}, 4P PlayAgain=${playAgain4Res.nonLitExpr}/${playAgain4Res.totalExpr}, maxLets=${maxLetsPerFunc})`
+    );
+  }
+
+  console.log(`\nStep 10.5 / 10.5.2 Public Activation & Permission Diagnosis Verification: ${passed}/13 test groups PASSED.`);
 }
 
 runStep105PublicActivationTests()

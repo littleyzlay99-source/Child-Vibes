@@ -17,6 +17,7 @@ import {
   googleProvider,
   signInWithPopup,
   signOut,
+  extractFirebaseErrorCode,
   handleFirestoreError,
   OperationType,
 } from '../lib/firebase';
@@ -156,7 +157,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 });
                 invalidateLeaderboardCache();
               } catch (migErr) {
-                console.warn('Legacy profile normalization skipped:', migErr);
+                console.warn('Legacy profile normalization skipped:', {
+                  errorCode: extractFirebaseErrorCode(migErr),
+                });
               }
             }
           }
@@ -205,11 +208,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               setUserTransactions(allTx);
             },
             (error) => {
-              console.warn('Transactions listener non-blocking notice:', error);
+              console.warn('Transactions listener non-blocking notice:', {
+                errorCode: extractFirebaseErrorCode(error),
+              });
             }
           );
         } catch (error) {
-          console.error('Error fetching/creating user profile:', error);
+          console.error('Error fetching/creating user profile:', {
+            errorCode: extractFirebaseErrorCode(error),
+          });
         }
       } else {
         setUserProfile(null);
@@ -252,7 +259,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await signOut(auth);
       setUserProfile(null);
     } catch (error) {
-      console.error('Logout error:', error);
+      console.error('Logout error:', { errorCode: extractFirebaseErrorCode(error) });
     }
   };
 

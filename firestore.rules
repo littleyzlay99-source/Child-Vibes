@@ -90,7 +90,8 @@ service cloud.firestore {
       ]);
     }
 
-    function isValidUser(data) {
+    function isValidUser(rawData) {
+      let data = rawData;
       return data.keys().hasAll(['id', 'playerId', 'displayName', 'level', 'xp', 'points', 'totalWins', 'totalGames', 'inventory']) &&
         data.id is string && data.id.size() <= 128 && data.id == request.auth.uid &&
         data.playerId is string && data.playerId.size() >= 2 && data.playerId.size() <= 24 &&
@@ -115,173 +116,374 @@ service cloud.firestore {
           data.claimedAchievements is list && data.claimedAchievements.size() <= 30 &&
           (data.claimedAchievements.size() == 0 || (data.claimedAchievements[0] is string && data.claimedAchievements[0].size() <= 40))
         )) &&
-        (!('lastClaimId' in data) || data.lastClaimId == null || (data.lastClaimId is string && data.lastClaimId.size() <= 128)) &&
-        (!('lastDailyClaimId' in data) || data.lastDailyClaimId == null || (data.lastDailyClaimId is string && data.lastDailyClaimId.size() <= 128)) &&
-        (!('lastAchievementClaimId' in data) || data.lastAchievementClaimId == null || (data.lastAchievementClaimId is string && data.lastAchievementClaimId.size() <= 128)) &&
-        (!('activeRoomId' in data) || data.activeRoomId == null || (data.activeRoomId is string && data.activeRoomId.size() <= 64)) &&
-        (!('activeRoomCode' in data) || data.activeRoomCode == null || (data.activeRoomCode is string && data.activeRoomCode.size() <= 16)) &&
-        (!('activeGameType' in data) || data.activeGameType == null || (data.activeGameType is string && data.activeGameType.size() <= 40)) &&
+        (data.get('lastClaimId', null) == null || (data.lastClaimId is string && data.lastClaimId.size() <= 128)) &&
+        (data.get('lastDailyClaimId', null) == null || (data.lastDailyClaimId is string && data.lastDailyClaimId.size() <= 128)) &&
+        (data.get('lastAchievementClaimId', null) == null || (data.lastAchievementClaimId is string && data.lastAchievementClaimId.size() <= 128)) &&
+        (data.get('activeRoomId', null) == null || (data.activeRoomId is string && data.activeRoomId.size() <= 64)) &&
+        (data.get('activeRoomCode', null) == null || (data.activeRoomCode is string && data.activeRoomCode.size() <= 16)) &&
+        (data.get('activeGameType', null) == null || (data.activeGameType is string && data.activeGameType.size() <= 40)) &&
         (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 40)) &&
         (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 40));
     }
 
-    // Room Player & Roster Validation Helpers (Bounded 1..4 Players, Zero Loops)
+    function canCreateUser(userId) {
+      let inc = request.resource.data;
+      return isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUserCreateKeys(inc) &&
+        isValidUser(inc) &&
+        inc.level == 1 &&
+        inc.xp == 0 &&
+        inc.totalXp == 0 &&
+        inc.points == 500 &&
+        inc.currentPoints == 500 &&
+        inc.totalPointsEarned == 500 &&
+        inc.totalWins == 0 &&
+        inc.totalGames == 0;
+    }
+
+    function isValidUserMatchRewardUpdate(inc, ext, userId) {
+      let claimId = inc.lastClaimId;
+      let claim = getAfter(/databases/$(database)/documents/reward_claims/$(claimId)).data;
+      return claimId is string && isValidId(claimId) &&
+        !exists(/databases/$(database)/documents/reward_claims/$(claimId)) &&
+        existsAfter(/databases/$(database)/documents/reward_claims/$(claimId)) &&
+        claim.userId == userId &&
+        int(inc.totalXp) == existingTotalXpRule(ext) + claim.xpGranted &&
+        int(inc.level) == computeLevelRule(inc.totalXp) &&
+        int(inc.xp) == computeCurrentLevelXpRule(inc.totalXp) &&
+        int(inc.points) == existingCurrentPointsRule(ext) + claim.pointsGranted &&
+        int(inc.currentPoints) == int(inc.points) &&
+        int(inc.totalPointsEarned) == existingTotalPointsEarnedRule(ext) + claim.pointsGranted &&
+        int(inc.totalGames) == int(ext.totalGames) + 1 &&
+        int(inc.totalWins) == int(ext.totalWins) + (claim.outcome == 'win' ? 1 : 0);
+    }
+
+    function isValidUserDailyRewardUpdate(inc, ext, userId) {
+      let claimId = inc.lastDailyClaimId;
+      let claim = getAfter(/databases/$(database)/documents/daily_claims/$(claimId)).data;
+      return claimId is string && isValidId(claimId) &&
+        !exists(/databases/$(database)/documents/daily_claims/$(claimId)) &&
+        existsAfter(/databases/$(database)/documents/daily_claims/$(claimId)) &&
+        claim.userId == userId &&
+        int(inc.totalXp) == existingTotalXpRule(ext) + claim.xpGranted &&
+        int(inc.level) == computeLevelRule(inc.totalXp) &&
+        int(inc.xp) == computeCurrentLevelXpRule(inc.totalXp) &&
+        int(inc.points) == existingCurrentPointsRule(ext) + claim.pointsGranted &&
+        int(inc.currentPoints) == int(inc.points) &&
+        int(inc.totalPointsEarned) == existingTotalPointsEarnedRule(ext) + claim.pointsGranted;
+    }
+
+    function isValidUserAchievementRewardUpdate(inc, ext, userId) {
+      let claimId = inc.lastAchievementClaimId;
+      let claim = getAfter(/databases/$(database)/documents/achievement_claims/$(claimId)).data;
+      return claimId is string && isValidId(claimId) &&
+        !exists(/databases/$(database)/documents/achievement_claims/$(claimId)) &&
+        existsAfter(/databases/$(database)/documents/achievement_claims/$(claimId)) &&
+        claim.userId == userId &&
+        int(inc.totalXp) == existingTotalXpRule(ext) + claim.xpGranted &&
+        int(inc.level) == computeLevelRule(inc.totalXp) &&
+        int(inc.xp) == computeCurrentLevelXpRule(inc.totalXp) &&
+        int(inc.points) == existingCurrentPointsRule(ext) + claim.pointsGranted &&
+        int(inc.currentPoints) == int(inc.points) &&
+        int(inc.totalPointsEarned) == existingTotalPointsEarnedRule(ext) + claim.pointsGranted;
+    }
+
+    function canUpdateUser(userId) {
+      let inc = request.resource.data;
+      let ext = resource.data;
+      let changed = inc.diff(ext).affectedKeys();
+      return isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUser(inc) &&
+        inc.id == ext.id &&
+        inc.playerId == ext.playerId && (
+          // Action 1: Non-Economy Profile, Cosmetic Equip, or Active Room Session Update
+          changed.hasOnly([
+            'displayName', 'photoURL',
+            'activeFrame', 'activeBoardSkin', 'activeDiceSkin', 'activeTokenSkin',
+            'activeRoomId', 'activeRoomCode', 'activeGameType',
+            'updatedAt'
+          ]) ||
+          // Action 2: One-Time Backward-Compatible Normalization for Pre-Upgrade Accounts
+          (
+            (!('totalXp' in ext) || !('totalPointsEarned' in ext) || !('currentPoints' in ext)) &&
+            changed.hasOnly([
+              'totalXp', 'level', 'xp', 'points', 'currentPoints', 'totalPointsEarned', 'updatedAt'
+            ]) &&
+            int(inc.points) == int(ext.points) &&
+            int(inc.currentPoints) == int(ext.points) &&
+            int(inc.totalPointsEarned) == existingTotalPointsEarnedRule(ext) &&
+            int(inc.totalXp) == existingTotalXpRule(ext) &&
+            int(inc.level) == computeLevelRule(inc.totalXp) &&
+            int(inc.xp) == computeCurrentLevelXpRule(inc.totalXp)
+          ) ||
+          // Action 3: Server-Verified Atomic Match Reward Claim (+100 XP/+1000 Pts Win, +75 XP/+500 Pts Loss)
+          (
+            changed.hasOnly([
+              'totalXp', 'level', 'xp', 'points', 'currentPoints', 'totalPointsEarned',
+              'totalGames', 'totalWins', 'lastClaimId', 'updatedAt'
+            ]) &&
+            isValidUserMatchRewardUpdate(inc, ext, userId)
+          ) ||
+          // Action 4: Server-Verified Atomic Daily Login Reward Claim
+          (
+            changed.hasOnly([
+              'totalXp', 'level', 'xp', 'points', 'currentPoints', 'totalPointsEarned',
+              'lastDailyClaimId', 'updatedAt'
+            ]) &&
+            isValidUserDailyRewardUpdate(inc, ext, userId)
+          ) ||
+          // Action 5: Server-Verified Atomic Achievement Reward Claim
+          (
+            changed.hasOnly([
+              'totalXp', 'level', 'xp', 'points', 'currentPoints', 'totalPointsEarned',
+              'claimedAchievements', 'lastAchievementClaimId', 'updatedAt'
+            ]) &&
+            isValidUserAchievementRewardUpdate(inc, ext, userId)
+          ) ||
+          // Action 6: Shop Item Purchase (Deducts ONLY Current Points; Total Points Earned & XP/Level Unchanged!)
+          (
+            changed.hasOnly([
+              'points', 'currentPoints', 'totalPointsEarned',
+              'totalXp', 'level', 'xp', 'inventory', 'updatedAt'
+            ]) &&
+            inc.inventory.size() == ext.inventory.size() + 1 &&
+            int(inc.points) <= existingCurrentPointsRule(ext) &&
+            int(inc.points) >= 0 &&
+            int(inc.currentPoints) == int(inc.points) &&
+            int(inc.totalPointsEarned) == existingTotalPointsEarnedRule(ext) &&
+            int(inc.totalXp) == existingTotalXpRule(ext) &&
+            int(inc.level) == computeLevelRule(inc.totalXp) &&
+            int(inc.xp) == computeCurrentLevelXpRule(inc.totalXp)
+          )
+        );
+    }
+
+    // Room Player & Roster Validation Helpers (Bounded 1..4 Players, Zero Loops, CEL let-bound)
     function isAllowedRoomGameType(gameType) {
       return gameType is string && gameType in ['snakes_and_ladders', 'snow_rush'];
     }
 
     function isValidRoomPlayer(p) {
+      let pk = p.keys();
+      let uid = p.uid;
+      let name = p.displayName;
+      let pos = p.position;
+      let lmid = p.get('lastMoveId', null);
+      let dAt = p.get('disconnectedAt', null);
+      let rk = p.get('rank', 1);
       return p is map &&
-        p.keys().hasAll(['uid', 'displayName', 'isReady', 'position']) &&
-        p.keys().hasOnly([
+        pk.hasAll(['uid', 'displayName', 'isReady', 'position']) &&
+        pk.hasOnly([
           'uid', 'playerId', 'displayName', 'photoURL', 'isReady', 'color',
           'position', 'positionVersion', 'lastMoveId', 'updatedAtMs',
           'activeTokenSkin', 'isConnected', 'lastSeen', 'rank', 'disconnectedAt'
         ]) &&
-        p.uid is string && p.uid.size() >= 1 && p.uid.size() <= 128 &&
-        (!('playerId' in p) || (p.playerId is string && p.playerId.size() <= 32)) &&
-        p.displayName is string && p.displayName.size() >= 1 && p.displayName.size() <= 60 &&
-        (!('photoURL' in p) || (p.photoURL is string && p.photoURL.size() <= 1000)) &&
+        uid is string && uid.size() >= 1 && uid.size() <= 128 &&
+        (p.get('playerId', '') + '').size() <= 32 &&
+        name is string && name.size() >= 1 && name.size() <= 60 &&
+        (p.get('photoURL', '') + '').size() <= 1000 &&
         p.isReady is bool &&
-        (!('color' in p) || (p.color is string && p.color.size() <= 24)) &&
-        p.position is number && p.position >= 1 && p.position <= 100 &&
-        (!('positionVersion' in p) || (p.positionVersion is number && p.positionVersion >= 1)) &&
-        (!('lastMoveId' in p) || p.lastMoveId == null || (p.lastMoveId is string && p.lastMoveId.size() <= 80)) &&
-        (!('updatedAtMs' in p) || (p.updatedAtMs is number && p.updatedAtMs >= 0)) &&
-        (!('activeTokenSkin' in p) || (p.activeTokenSkin is string && p.activeTokenSkin.size() <= 50)) &&
-        (!('isConnected' in p) || p.isConnected is bool) &&
-        (!('lastSeen' in p) || (p.lastSeen is number && p.lastSeen >= 0)) &&
-        (!('rank' in p) || (p.rank is number && p.rank >= 1 && p.rank <= 4)) &&
-        (!('disconnectedAt' in p) || p.disconnectedAt == null || (p.disconnectedAt is number && p.disconnectedAt >= 0));
+        (p.get('color', '') + '').size() <= 24 &&
+        pos is number && pos >= 1 && pos <= 100 &&
+        p.get('positionVersion', 1) >= 1 &&
+        (lmid == null || (lmid is string && lmid.size() <= 80)) &&
+        p.get('updatedAtMs', 0) >= 0 &&
+        (p.get('activeTokenSkin', '') + '').size() <= 50 &&
+        p.get('isConnected', true) is bool &&
+        p.get('lastSeen', 0) >= 0 &&
+        rk >= 1 && rk <= 4 &&
+        (dAt == null || (dAt is number && dAt >= 0));
     }
 
     function areAllRoomPlayersValid(players) {
-      return players is list && players.size() >= 1 && players.size() <= 4 &&
+      let sz = players.size();
+      return players is list && sz >= 1 && sz <= 4 &&
         isValidRoomPlayer(players[0]) &&
-        (players.size() < 2 || isValidRoomPlayer(players[1])) &&
-        (players.size() < 3 || isValidRoomPlayer(players[2])) &&
-        (players.size() < 4 || isValidRoomPlayer(players[3]));
+        (sz < 2 || isValidRoomPlayer(players[1])) &&
+        (sz < 3 || isValidRoomPlayer(players[2])) &&
+        (sz < 4 || isValidRoomPlayer(players[3]));
+    }
+
+    function isValidExistingPlayerDelta(oldP, p, pAllowed) {
+      let lmid = p.get('lastMoveId', null);
+      let dAt = p.get('disconnectedAt', null);
+      let rk = p.get('rank', 1);
+      return p is map &&
+        p.uid == oldP.uid &&
+        p.diff(oldP).affectedKeys().hasOnly(pAllowed) &&
+        p.isReady is bool &&
+        p.position >= 1 && p.position <= 100 &&
+        p.get('positionVersion', 1) >= 1 &&
+        (lmid == null || (lmid is string && lmid.size() <= 80)) &&
+        p.get('updatedAtMs', 0) >= 0 &&
+        p.get('isConnected', true) is bool &&
+        p.get('lastSeen', 0) >= 0 &&
+        rk >= 1 && rk <= 4 &&
+        (dAt == null || dAt >= 0);
+    }
+
+    function isValidUpdatedPlayerSlot(oldPlayers, oldSz, p, idx, pAllowed) {
+      return (p in oldPlayers) ||
+        (oldSz > idx && oldPlayers[idx].uid == p.uid && isValidExistingPlayerDelta(oldPlayers[idx], p, pAllowed)) ||
+        isValidRoomPlayer(p);
+    }
+
+    function areUpdatedRoomPlayersValid(oldPlayers, newPlayers) {
+      let newSz = newPlayers.size();
+      let oldSz = oldPlayers.size();
+      let pAllowed = [
+        'isReady', 'position', 'positionVersion', 'lastMoveId',
+        'updatedAtMs', 'isConnected', 'lastSeen', 'rank', 'disconnectedAt'
+      ];
+      return newPlayers is list && newSz >= 1 && newSz <= 4 && (
+        newPlayers == oldPlayers || (
+          isValidUpdatedPlayerSlot(oldPlayers, oldSz, newPlayers[0], 0, pAllowed) &&
+          (newSz < 2 || isValidUpdatedPlayerSlot(oldPlayers, oldSz, newPlayers[1], 1, pAllowed)) &&
+          (newSz < 3 || isValidUpdatedPlayerSlot(oldPlayers, oldSz, newPlayers[2], 2, pAllowed)) &&
+          (newSz < 4 || isValidUpdatedPlayerSlot(oldPlayers, oldSz, newPlayers[3], 3, pAllowed))
+        )
+      );
     }
 
     function hasUniquePlayerUids(players) {
-      return (players.size() < 2 || players[0].uid != players[1].uid) &&
-        (players.size() < 3 || (players[0].uid != players[2].uid && players[1].uid != players[2].uid)) &&
-        (players.size() < 4 || (players[0].uid != players[3].uid && players[1].uid != players[3].uid && players[2].uid != players[3].uid));
+      let sz = players.size();
+      return (sz < 2 || players[0].uid != players[1].uid) &&
+        (sz < 3 || (players[0].uid != players[2].uid && players[1].uid != players[2].uid)) &&
+        (sz < 4 || (players[0].uid != players[3].uid && players[1].uid != players[3].uid && players[2].uid != players[3].uid));
     }
 
     function isPlayerInList(players, uid) {
+      let sz = players.size();
       return players is list && (
-        (players.size() >= 1 && players[0].uid == uid) ||
-        (players.size() >= 2 && players[1].uid == uid) ||
-        (players.size() >= 3 && players[2].uid == uid) ||
-        (players.size() >= 4 && players[3].uid == uid)
+        (sz >= 1 && players[0].uid == uid) ||
+        (sz >= 2 && players[1].uid == uid) ||
+        (sz >= 3 && players[2].uid == uid) ||
+        (sz >= 4 && players[3].uid == uid)
       );
     }
 
     function samePlayerRosterUids(oldPlayers, newPlayers) {
-      return oldPlayers.size() == newPlayers.size() &&
-        (oldPlayers.size() < 1 || oldPlayers[0].uid == newPlayers[0].uid) &&
-        (oldPlayers.size() < 2 || oldPlayers[1].uid == newPlayers[1].uid) &&
-        (oldPlayers.size() < 3 || oldPlayers[2].uid == newPlayers[2].uid) &&
-        (oldPlayers.size() < 4 || oldPlayers[3].uid == newPlayers[3].uid);
+      let sz = oldPlayers.size();
+      return sz == newPlayers.size() &&
+        (sz < 1 || oldPlayers[0].uid == newPlayers[0].uid) &&
+        (sz < 2 || oldPlayers[1].uid == newPlayers[1].uid) &&
+        (sz < 3 || oldPlayers[2].uid == newPlayers[2].uid) &&
+        (sz < 4 || oldPlayers[3].uid == newPlayers[3].uid);
     }
 
     function samePlayerPositions(oldPlayers, newPlayers) {
-      return oldPlayers.size() == newPlayers.size() &&
-        (oldPlayers.size() < 1 || oldPlayers[0].position == newPlayers[0].position) &&
-        (oldPlayers.size() < 2 || oldPlayers[1].position == newPlayers[1].position) &&
-        (oldPlayers.size() < 3 || oldPlayers[2].position == newPlayers[2].position) &&
-        (oldPlayers.size() < 4 || oldPlayers[3].position == newPlayers[3].position);
+      let sz = oldPlayers.size();
+      return sz == newPlayers.size() &&
+        (sz < 1 || oldPlayers[0].position == newPlayers[0].position) &&
+        (sz < 2 || oldPlayers[1].position == newPlayers[1].position) &&
+        (sz < 3 || oldPlayers[2].position == newPlayers[2].position) &&
+        (sz < 4 || oldPlayers[3].position == newPlayers[3].position);
     }
 
     function samePlayersReady(oldPlayers, newPlayers) {
-      return oldPlayers.size() == newPlayers.size() &&
-        (oldPlayers.size() < 1 || oldPlayers[0].isReady == newPlayers[0].isReady) &&
-        (oldPlayers.size() < 2 || oldPlayers[1].isReady == newPlayers[1].isReady) &&
-        (oldPlayers.size() < 3 || oldPlayers[2].isReady == newPlayers[2].isReady) &&
-        (oldPlayers.size() < 4 || oldPlayers[3].isReady == newPlayers[3].isReady);
+      let sz = oldPlayers.size();
+      return sz == newPlayers.size() &&
+        (sz < 1 || oldPlayers[0].isReady == newPlayers[0].isReady) &&
+        (sz < 2 || oldPlayers[1].isReady == newPlayers[1].isReady) &&
+        (sz < 3 || oldPlayers[2].isReady == newPlayers[2].isReady) &&
+        (sz < 4 || oldPlayers[3].isReady == newPlayers[3].isReady);
     }
 
-    function onlyCallerChangedReady(oldPlayers, newPlayers, callerUid) {
-      return oldPlayers.size() == newPlayers.size() &&
-        (oldPlayers.size() < 1 || oldPlayers[0].uid == callerUid || oldPlayers[0].isReady == newPlayers[0].isReady) &&
-        (oldPlayers.size() < 2 || oldPlayers[1].uid == callerUid || oldPlayers[1].isReady == newPlayers[1].isReady) &&
-        (oldPlayers.size() < 3 || oldPlayers[2].uid == callerUid || oldPlayers[2].isReady == newPlayers[2].isReady) &&
-        (oldPlayers.size() < 4 || oldPlayers[3].uid == callerUid || oldPlayers[3].isReady == newPlayers[3].isReady);
+    function isValidReadySlot(oldP, newP, callerUid) {
+      return oldP.uid == newP.uid &&
+        oldP.position == newP.position &&
+        (oldP.uid == callerUid || oldP.isReady == newP.isReady);
+    }
+
+    function isValidReadyToggleRoster(oldPlayers, newPlayers, callerUid) {
+      let sz = oldPlayers.size();
+      return sz == newPlayers.size() &&
+        (sz < 1 || isValidReadySlot(oldPlayers[0], newPlayers[0], callerUid)) &&
+        (sz < 2 || isValidReadySlot(oldPlayers[1], newPlayers[1], callerUid)) &&
+        (sz < 3 || isValidReadySlot(oldPlayers[2], newPlayers[2], callerUid)) &&
+        (sz < 4 || isValidReadySlot(oldPlayers[3], newPlayers[3], callerUid));
     }
 
     function areAllNonHostPlayersReady(players, hostId) {
-      return (players.size() < 1 || players[0].uid == hostId || players[0].isReady == true) &&
-        (players.size() < 2 || players[1].uid == hostId || players[1].isReady == true) &&
-        (players.size() < 3 || players[2].uid == hostId || players[2].isReady == true) &&
-        (players.size() < 4 || players[3].uid == hostId || players[3].isReady == true);
+      let sz = players.size();
+      return (sz < 1 || players[0].uid == hostId || players[0].isReady == true) &&
+        (sz < 2 || players[1].uid == hostId || players[1].isReady == true) &&
+        (sz < 3 || players[2].uid == hostId || players[2].isReady == true) &&
+        (sz < 4 || players[3].uid == hostId || players[3].isReady == true);
     }
 
-    function allPlayersAtStartPosition(players) {
-      return (players.size() < 1 || players[0].position == 1) &&
-        (players.size() < 2 || players[1].position == 1) &&
-        (players.size() < 3 || players[2].position == 1) &&
-        (players.size() < 4 || players[3].position == 1);
+    function sameRosterAllAtStart(oldPlayers, newPlayers) {
+      let sz = oldPlayers.size();
+      return sz == newPlayers.size() &&
+        (sz < 1 || (oldPlayers[0].uid == newPlayers[0].uid && newPlayers[0].position == 1)) &&
+        (sz < 2 || (oldPlayers[1].uid == newPlayers[1].uid && newPlayers[1].position == 1)) &&
+        (sz < 3 || (oldPlayers[2].uid == newPlayers[2].uid && newPlayers[2].position == 1)) &&
+        (sz < 4 || (oldPlayers[3].uid == newPlayers[3].uid && newPlayers[3].position == 1));
     }
 
     function preserveExistingPlayersOnJoin(oldPlayers, newPlayers, joinUid) {
-      return newPlayers.size() == oldPlayers.size() + 1 &&
-        (oldPlayers.size() < 1 || (oldPlayers[0].uid == newPlayers[0].uid && oldPlayers[0].isReady == newPlayers[0].isReady && oldPlayers[0].position == newPlayers[0].position)) &&
-        (oldPlayers.size() < 2 || (oldPlayers[1].uid == newPlayers[1].uid && oldPlayers[1].isReady == newPlayers[1].isReady && oldPlayers[1].position == newPlayers[1].position)) &&
-        (oldPlayers.size() < 3 || (oldPlayers[2].uid == newPlayers[2].uid && oldPlayers[2].isReady == newPlayers[2].isReady && oldPlayers[2].position == newPlayers[2].position)) &&
-        newPlayers[newPlayers.size() - 1].uid == joinUid &&
-        newPlayers[newPlayers.size() - 1].isReady == false &&
-        newPlayers[newPlayers.size() - 1].position == 1;
+      let oldSz = oldPlayers.size();
+      let newSz = newPlayers.size();
+      let joined = newPlayers[newSz - 1];
+      return newSz == oldSz + 1 &&
+        (oldSz < 1 || (oldPlayers[0].uid == newPlayers[0].uid && oldPlayers[0].isReady == newPlayers[0].isReady && oldPlayers[0].position == newPlayers[0].position)) &&
+        (oldSz < 2 || (oldPlayers[1].uid == newPlayers[1].uid && oldPlayers[1].isReady == newPlayers[1].isReady && oldPlayers[1].position == newPlayers[1].position)) &&
+        (oldSz < 3 || (oldPlayers[2].uid == newPlayers[2].uid && oldPlayers[2].isReady == newPlayers[2].isReady && oldPlayers[2].position == newPlayers[2].position)) &&
+        joined.uid == joinUid &&
+        joined.isReady == false &&
+        joined.position == 1;
     }
 
     function playerMatchesPositionInExisting(p, oldPlayers) {
-      return (oldPlayers.size() >= 1 && oldPlayers[0].uid == p.uid && oldPlayers[0].position == p.position) ||
-        (oldPlayers.size() >= 2 && oldPlayers[1].uid == p.uid && oldPlayers[1].position == p.position) ||
-        (oldPlayers.size() >= 3 && oldPlayers[2].uid == p.uid && oldPlayers[2].position == p.position) ||
-        (oldPlayers.size() >= 4 && oldPlayers[3].uid == p.uid && oldPlayers[3].position == p.position);
+      let pUid = p.uid;
+      let pPos = p.position;
+      let sz = oldPlayers.size();
+      return (sz >= 1 && oldPlayers[0].uid == pUid && oldPlayers[0].position == pPos) ||
+        (sz >= 2 && oldPlayers[1].uid == pUid && oldPlayers[1].position == pPos) ||
+        (sz >= 3 && oldPlayers[2].uid == pUid && oldPlayers[2].position == pPos) ||
+        (sz >= 4 && oldPlayers[3].uid == pUid && oldPlayers[3].position == pPos);
     }
 
     function allRemainingPreservePositions(remPlayers, oldPlayers) {
-      return (remPlayers.size() < 1 || playerMatchesPositionInExisting(remPlayers[0], oldPlayers)) &&
-        (remPlayers.size() < 2 || playerMatchesPositionInExisting(remPlayers[1], oldPlayers)) &&
-        (remPlayers.size() < 3 || playerMatchesPositionInExisting(remPlayers[2], oldPlayers));
+      let sz = remPlayers.size();
+      return (sz < 1 || playerMatchesPositionInExisting(remPlayers[0], oldPlayers)) &&
+        (sz < 2 || playerMatchesPositionInExisting(remPlayers[1], oldPlayers)) &&
+        (sz < 3 || playerMatchesPositionInExisting(remPlayers[2], oldPlayers));
     }
 
     function existingGameRound(roomData) {
-      return ('gameRound' in roomData && roomData.gameRound is number) ? int(roomData.gameRound) : 1;
+      let gr = roomData.get('gameRound', 1);
+      return gr is number ? int(gr) : 1;
     }
 
     function hasMonotonicStateVersion(oldRoom, newRoom) {
-      return ('stateVersion' in newRoom) &&
-        newRoom.stateVersion is number &&
-        (!('stateVersion' in oldRoom) || newRoom.stateVersion > oldRoom.stateVersion);
+      let nv = newRoom.stateVersion;
+      let ov = oldRoom.get('stateVersion', 0);
+      return ('stateVersion' in newRoom) && nv is number && nv > ov;
     }
 
     function sameWinnerId(oldRoom, newRoom) {
-      return (
-        (!('winnerId' in oldRoom) || oldRoom.winnerId == null) &&
-        (!('winnerId' in newRoom) || newRoom.winnerId == null)
-      ) || (
-        ('winnerId' in oldRoom) &&
-        ('winnerId' in newRoom) &&
-        oldRoom.winnerId == newRoom.winnerId
-      );
+      return oldRoom.get('winnerId', null) == newRoom.get('winnerId', null);
     }
 
     function isCurrentTurnPlayer(roomData, uid) {
+      let idx = roomData.currentTurnIndex;
       return ('currentTurnIndex' in roomData) &&
-        roomData.currentTurnIndex is number &&
-        roomData.currentTurnIndex >= 0 &&
-        roomData.currentTurnIndex < roomData.players.size() &&
-        roomData.players[int(roomData.currentTurnIndex)].uid == uid;
+        idx is number &&
+        idx >= 0 &&
+        idx < roomData.players.size() &&
+        roomData.players[int(idx)].uid == uid;
     }
 
     function nonTurnPlayerPositionsUnchanged(oldPlayers, newPlayers, turnIdx) {
-      return oldPlayers.size() == newPlayers.size() &&
-        (oldPlayers.size() < 1 || turnIdx == 0 || oldPlayers[0].position == newPlayers[0].position) &&
-        (oldPlayers.size() < 2 || turnIdx == 1 || oldPlayers[1].position == newPlayers[1].position) &&
-        (oldPlayers.size() < 3 || turnIdx == 2 || oldPlayers[2].position == newPlayers[2].position) &&
-        (oldPlayers.size() < 4 || turnIdx == 3 || oldPlayers[3].position == newPlayers[3].position);
+      let sz = oldPlayers.size();
+      return sz == newPlayers.size() &&
+        (sz < 1 || turnIdx == 0 || oldPlayers[0].position == newPlayers[0].position) &&
+        (sz < 2 || turnIdx == 1 || oldPlayers[1].position == newPlayers[1].position) &&
+        (sz < 3 || turnIdx == 2 || oldPlayers[2].position == newPlayers[2].position) &&
+        (sz < 4 || turnIdx == 3 || oldPlayers[3].position == newPlayers[3].position);
     }
 
     // Verified Snakes & Ladders single-turn reachability (Dice 1..6 + Ladders 4->14, 9->31, 20->38, 28->84, 40->59, 51->67, 63->81, 71->91)
@@ -300,15 +502,16 @@ service cloud.firestore {
     }
 
     function isValidSnakesLeaveOutcome(oldRoom, newRoom) {
+      let newSz = newRoom.players.size();
       return (
         oldRoom.status in ['waiting', 'full'] &&
-        newRoom.winnerId == null &&
-        (!('winnerName' in newRoom) || newRoom.winnerName == null) &&
-        newRoom.status == (newRoom.players.size() >= newRoom.maxPlayers ? 'full' : 'waiting')
+        newRoom.get('winnerId', null) == null &&
+        newRoom.get('winnerName', null) == null &&
+        newRoom.status == (newSz >= newRoom.maxPlayers ? 'full' : 'waiting')
       ) || (
         oldRoom.status == 'playing' && (
-          (newRoom.players.size() == 1 && newRoom.status == 'finished' && newRoom.winnerId == newRoom.players[0].uid) ||
-          (newRoom.players.size() >= 2 && newRoom.status == 'playing' && newRoom.winnerId == null && (!('winnerName' in newRoom) || newRoom.winnerName == null))
+          (newSz == 1 && newRoom.status == 'finished' && newRoom.winnerId == newRoom.players[0].uid) ||
+          (newSz >= 2 && newRoom.status == 'playing' && newRoom.get('winnerId', null) == null && newRoom.get('winnerName', null) == null)
         )
       ) || (
         oldRoom.status == 'finished' &&
@@ -317,9 +520,109 @@ service cloud.firestore {
       );
     }
 
+    function isValidRoomCoreAndMeta(data, pSize) {
+      let cti = data.get('currentTurnIndex', 0);
+      let ldr = data.get('lastDiceRoll', 1);
+      let lmid = data.get('lastMoveId', null);
+      let rcd = data.get('reconnectionDeadline', null);
+      let dpid = data.get('disconnectedPlayerId', null);
+      let dpnm = data.get('disconnectedPlayerName', null);
+      let wid = data.get('winnerId', null);
+      let wnm = data.get('winnerName', null);
+      let lmp = data.get('lastMovingPlayerUid', null);
+      return (data.get('hostName', '') + '').size() <= 60 &&
+        data.status in ['waiting', 'full', 'playing', 'finished'] &&
+        data.maxPlayers is number && data.maxPlayers >= 2 && data.maxPlayers <= 4 &&
+        pSize <= data.maxPlayers &&
+        data.get('playerCount', pSize) == pSize &&
+        cti >= 0 && cti < 4 &&
+        ldr >= 1 && ldr <= 6 &&
+        (!('matchParticipantIds' in data) || (
+          data.matchParticipantIds is list && data.matchParticipantIds.size() <= 4 &&
+          (data.matchParticipantIds.size() == 0 || (data.matchParticipantIds[0] is string && data.matchParticipantIds[0].size() <= 128))
+        )) &&
+        data.get('exactFinish', false) is bool &&
+        data.get('stateVersion', 1) >= 1 &&
+        data.get('gameRound', 1) >= 1 &&
+        (lmid == null || (lmid is string && lmid.size() <= 80)) &&
+        (!('playerPositions' in data) || (data.playerPositions is map && data.playerPositions.size() <= 4)) &&
+        (!('presence' in data) || (data.presence is map && data.presence.size() <= 16)) &&
+        data.get('turnStartTimestamp', 0) >= 0 &&
+        data.get('turnDeadline', 0) >= 0 &&
+        (rcd == null || (rcd is number && rcd >= 0)) &&
+        (dpid == null || (dpid is string && dpid.size() <= 128)) &&
+        (dpnm == null || (dpnm is string && dpnm.size() <= 60)) &&
+        data.get('lastMoveTimestamp', 0) >= 0 &&
+        (data.get('lastMoveSummary', '') + '').size() <= 500 &&
+        (wid == null || (wid is string && wid.size() >= 1 && wid.size() <= 128)) &&
+        (wnm == null || (wnm is string && wnm.size() <= 60)) &&
+        (!('lastMovePath' in data) || (data.lastMovePath is list && data.lastMovePath.size() <= 20)) &&
+        (lmp == null || (lmp is string && lmp.size() <= 128)) &&
+        (data.get('createdAt', '') + '').size() <= 40 &&
+        (data.get('updatedAt', '') + '').size() <= 40 &&
+        (!('timestamp' in data) || data.timestamp is timestamp) &&
+        (!('serverUpdatedAt' in data) || data.serverUpdatedAt is timestamp) &&
+        // Phase 1 Snow Rush Result Lock: Client can NEVER set status == 'finished' or winnerId/winnerName on Snow Rush rooms
+        (
+          data.gameType != 'snow_rush' || (
+            data.status in ['waiting', 'full', 'playing'] &&
+            wid == null &&
+            wnm == null
+          )
+        );
+    }
+
+    function isValidUpdatedRoomCore(d, pSize) {
+      let wid = d.get('winnerId', null);
+      let wnm = d.get('winnerName', null);
+      let lmid = d.get('lastMoveId', null);
+      let rcd = d.get('reconnectionDeadline', null);
+      let dpid = d.get('disconnectedPlayerId', null);
+      let dpnm = d.get('disconnectedPlayerName', null);
+      let lmp = d.get('lastMovingPlayerUid', null);
+      return d.status in ['waiting', 'full', 'playing', 'finished'] &&
+        pSize <= d.maxPlayers &&
+        d.get('playerCount', pSize) == pSize &&
+        d.get('currentTurnIndex', 0) >= 0 && d.get('currentTurnIndex', 0) < 4 &&
+        d.get('lastDiceRoll', 1) >= 1 && d.get('lastDiceRoll', 1) <= 6 &&
+        d.get('stateVersion', 1) >= 1 &&
+        d.get('gameRound', 1) >= 1 &&
+        d.get('turnStartTimestamp', 0) >= 0 &&
+        d.get('turnDeadline', 0) >= 0 &&
+        d.get('lastMoveTimestamp', 0) >= 0 &&
+        (d.get('hostName', '') + '').size() <= 60 &&
+        (d.get('lastMoveSummary', '') + '').size() <= 500 &&
+        (d.get('updatedAt', '') + '').size() <= 40 &&
+        (lmid == null || (lmid is string && lmid.size() <= 80)) &&
+        (rcd == null || rcd >= 0) &&
+        (dpid == null || (dpid is string && dpid.size() <= 128)) &&
+        (dpnm == null || (dpnm is string && dpnm.size() <= 60)) &&
+        (wid == null || (wid is string && wid.size() >= 1 && wid.size() <= 128)) &&
+        (wnm == null || (wnm is string && wnm.size() <= 60)) &&
+        (lmp == null || (lmp is string && lmp.size() <= 128)) &&
+        (!('matchParticipantIds' in d) || (d.matchParticipantIds is list && d.matchParticipantIds.size() <= 4)) &&
+        (!('playerPositions' in d) || (d.playerPositions is map && d.playerPositions.size() <= 4)) &&
+        (!('presence' in d) || (d.presence is map && d.presence.size() <= 16)) &&
+        (!('lastMovePath' in d) || (d.lastMovePath is list && d.lastMovePath.size() <= 20)) &&
+        (!('serverUpdatedAt' in d) || d.serverUpdatedAt is timestamp) &&
+        (
+          d.gameType != 'snow_rush' || (
+            d.status in ['waiting', 'full', 'playing'] &&
+            wid == null &&
+            wnm == null
+          )
+        );
+    }
+
     function isValidGameRoom(data) {
-      return data.keys().hasAll(['id', 'roomCode', 'gameType', 'hostId', 'status', 'maxPlayers', 'players']) &&
-        data.keys().hasOnly([
+      let keys = data.keys();
+      let players = data.players;
+      let pSize = players.size();
+      let roomIdVal = data.id;
+      let codeVal = data.roomCode;
+      let hostVal = data.hostId;
+      return keys.hasAll(['id', 'roomCode', 'gameType', 'hostId', 'status', 'maxPlayers', 'players']) &&
+        keys.hasOnly([
           'id', 'roomCode', 'gameType', 'hostId', 'hostName',
           'status', 'maxPlayers', 'playerCount', 'players',
           'currentTurnIndex', 'lastDiceRoll', 'lastMoveSummary',
@@ -331,56 +634,275 @@ service cloud.firestore {
           'lastMoveTimestamp', 'lastMovePath', 'lastMovingPlayerUid',
           'createdAt', 'updatedAt', 'timestamp', 'serverUpdatedAt'
         ]) &&
-        data.id is string && data.id.size() >= 6 && data.id.size() <= 64 &&
-        data.roomCode is string && data.roomCode.size() >= 4 && data.roomCode.size() <= 16 &&
+        roomIdVal is string && roomIdVal.size() >= 6 && roomIdVal.size() <= 64 &&
+        codeVal is string && codeVal.size() >= 4 && codeVal.size() <= 16 &&
         isAllowedRoomGameType(data.gameType) &&
-        data.hostId is string && data.hostId.size() >= 1 && data.hostId.size() <= 128 &&
-        (!('hostName' in data) || (data.hostName is string && data.hostName.size() <= 60)) &&
-        data.status in ['waiting', 'full', 'playing', 'finished'] &&
-        data.maxPlayers is number && data.maxPlayers >= 2 && data.maxPlayers <= 4 &&
-        areAllRoomPlayersValid(data.players) &&
-        data.players.size() <= data.maxPlayers &&
-        hasUniquePlayerUids(data.players) &&
-        isPlayerInList(data.players, data.hostId) &&
-        (!('playerCount' in data) || (data.playerCount is number && data.playerCount == data.players.size())) &&
-        (!('currentTurnIndex' in data) || (data.currentTurnIndex is number && data.currentTurnIndex >= 0 && data.currentTurnIndex < 4)) &&
-        (!('lastDiceRoll' in data) || (data.lastDiceRoll is number && data.lastDiceRoll >= 1 && data.lastDiceRoll <= 6)) &&
-        (!('matchParticipantIds' in data) || (
-          data.matchParticipantIds is list && data.matchParticipantIds.size() <= 4 &&
-          (data.matchParticipantIds.size() == 0 || (data.matchParticipantIds[0] is string && data.matchParticipantIds[0].size() <= 128))
-        )) &&
-        (!('exactFinish' in data) || data.exactFinish is bool) &&
-        (!('stateVersion' in data) || (data.stateVersion is number && data.stateVersion >= 1)) &&
-        (!('gameRound' in data) || (data.gameRound is number && data.gameRound >= 1)) &&
-        (!('lastMoveId' in data) || data.lastMoveId == null || (data.lastMoveId is string && data.lastMoveId.size() <= 80)) &&
-        (!('playerPositions' in data) || (data.playerPositions is map && data.playerPositions.size() <= 4)) &&
-        (!('presence' in data) || (data.presence is map && data.presence.size() <= 16)) &&
-        (!('turnStartTimestamp' in data) || (data.turnStartTimestamp is number && data.turnStartTimestamp >= 0)) &&
-        (!('turnDeadline' in data) || (data.turnDeadline is number && data.turnDeadline >= 0)) &&
-        (!('reconnectionDeadline' in data) || data.reconnectionDeadline == null || (data.reconnectionDeadline is number && data.reconnectionDeadline >= 0)) &&
-        (!('disconnectedPlayerId' in data) || data.disconnectedPlayerId == null || (data.disconnectedPlayerId is string && data.disconnectedPlayerId.size() <= 128)) &&
-        (!('disconnectedPlayerName' in data) || data.disconnectedPlayerName == null || (data.disconnectedPlayerName is string && data.disconnectedPlayerName.size() <= 60)) &&
-        (!('lastMoveTimestamp' in data) || (data.lastMoveTimestamp is number && data.lastMoveTimestamp >= 0)) &&
-        (!('lastMoveSummary' in data) || (data.lastMoveSummary is string && data.lastMoveSummary.size() <= 500)) &&
-        (!('winnerId' in data) || data.winnerId == null || (data.winnerId is string && data.winnerId.size() >= 1 && data.winnerId.size() <= 128)) &&
-        (!('winnerName' in data) || data.winnerName == null || (data.winnerName is string && data.winnerName.size() <= 60)) &&
-        (!('lastMovePath' in data) || (data.lastMovePath is list && data.lastMovePath.size() <= 20)) &&
-        (!('lastMovingPlayerUid' in data) || data.lastMovingPlayerUid == null || (data.lastMovingPlayerUid is string && data.lastMovingPlayerUid.size() <= 128)) &&
-        (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 40)) &&
-        (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 40)) &&
-        (!('timestamp' in data) || data.timestamp is timestamp) &&
-        (!('serverUpdatedAt' in data) || data.serverUpdatedAt is timestamp) &&
-        // Phase 1 Snow Rush Result Lock: Client can NEVER set status == 'finished' or winnerId/winnerName on Snow Rush rooms
+        hostVal is string && hostVal.size() >= 1 && hostVal.size() <= 128 &&
+        areAllRoomPlayersValid(players) &&
+        hasUniquePlayerUids(players) &&
+        isPlayerInList(players, hostVal) &&
+        isValidRoomCoreAndMeta(data, pSize);
+    }
+
+    function canCreateGameRoom(roomId) {
+      let inc = request.resource.data;
+      let uid = request.auth.uid;
+      let players = inc.players;
+      return isSignedIn() &&
+        isValidId(roomId) &&
+        isValidGameRoom(inc) &&
+        inc.id == roomId &&
+        roomId == 'room_' + inc.roomCode &&
+        inc.hostId == uid &&
+        inc.status == 'waiting' &&
+        inc.get('winnerId', null) == null &&
+        inc.get('winnerName', null) == null &&
+        players.size() == 1 &&
+        players[0].uid == uid &&
+        players[0].position == 1 &&
+        ('gameRound' in inc) && inc.gameRound == 1 &&
+        ('stateVersion' in inc) && inc.stateVersion == 1 &&
+        (!('timestamp' in inc) || inc.timestamp == request.time) &&
+        (!('serverUpdatedAt' in inc) || inc.serverUpdatedAt == request.time);
+    }
+
+    function isValidSnakesActiveTurnMove(inc, ext, oldP, newP, uid) {
+      let turnIdx = int(ext.currentTurnIndex);
+      let oldPos = oldP[turnIdx].position;
+      let newPos = newP[turnIdx].position;
+      return ext.get('winnerId', null) == null &&
+        isCurrentTurnPlayer(ext, uid) &&
+        samePlayerRosterUids(oldP, newP) &&
+        nonTurnPlayerPositionsUnchanged(oldP, newP, turnIdx) &&
+        isValidSnakesTurnPositionStep(oldPos, newPos) &&
+        inc.lastDiceRoll is number && inc.lastDiceRoll >= 1 && inc.lastDiceRoll <= 6 &&
+        inc.lastMovingPlayerUid == uid &&
+        inc.hostId == ext.hostId &&
+        existingGameRound(inc) == existingGameRound(ext) &&
         (
-          data.gameType != 'snow_rush' || (
-            data.status in ['waiting', 'full', 'playing'] &&
-            (!('winnerId' in data) || data.winnerId == null) &&
-            (!('winnerName' in data) || data.winnerName == null)
+          inc.status == 'playing'
+            ? (inc.get('winnerId', null) == null && inc.get('winnerName', null) == null)
+            : (
+              inc.status == 'finished' &&
+              inc.winnerId == uid &&
+              oldPos >= 94 &&
+              newPos == 100
+            )
+        ) &&
+        hasMonotonicStateVersion(ext, inc);
+    }
+
+    function canUpdateGameRoom(roomId) {
+      let inc = request.resource.data;
+      let ext = resource.data;
+      let uid = request.auth.uid;
+      let oldP = ext.players;
+      let newP = inc.players;
+      let changed = inc.diff(ext).affectedKeys();
+      let isMember = isPlayerInList(oldP, uid);
+      let hostVal = inc.hostId;
+
+      return isSignedIn() &&
+        isValidId(roomId) &&
+        // Universal Immutable Room Identity Fields
+        inc.id == ext.id &&
+        inc.roomCode == ext.roomCode &&
+        isAllowedRoomGameType(inc.gameType) &&
+        inc.gameType == ext.gameType &&
+        inc.maxPlayers == ext.maxPlayers &&
+        (!('createdAt' in ext) ? !('createdAt' in inc) : inc.createdAt == ext.createdAt) && (
+          // Action 1: Member-Only Isolated Presence Heartbeat (Zero changes outside presence[uid])
+          (
+            changed.size() == 1 &&
+            changed.hasOnly(['presence']) &&
+            isMember &&
+            inc.presence is map &&
+            inc.presence.size() <= 16 &&
+            (
+              !('presence' in ext) ||
+              !(ext.presence is map) ||
+              inc.presence.diff(ext.presence).affectedKeys().hasOnly([uid])
+            )
+          ) || (
+            inc.keys().hasAll(['id', 'roomCode', 'gameType', 'hostId', 'status', 'maxPlayers', 'players']) &&
+            hostVal is string && hostVal.size() >= 1 && hostVal.size() <= 128 &&
+            areUpdatedRoomPlayersValid(oldP, newP) &&
+            isValidUpdatedRoomCore(inc, newP.size()) && (
+              // Action 2: New Player Join Waiting Room (Appends Self Only)
+              (
+                !isMember &&
+                ext.status in ['waiting', 'full'] &&
+                oldP.size() >= 1 &&
+                oldP.size() < ext.maxPlayers &&
+                changed.hasOnly([
+                  'players', 'playerCount', 'maxPlayers', 'status',
+                  'winnerId', 'winnerName', 'playerPositions', 'presence',
+                  'stateVersion', 'lastMoveSummary', 'updatedAt', 'serverUpdatedAt'
+                ]) &&
+                preserveExistingPlayersOnJoin(oldP, newP, uid) &&
+                hostVal == ext.hostId &&
+                existingGameRound(inc) == existingGameRound(ext) &&
+                inc.get('winnerId', null) == null &&
+                inc.get('winnerName', null) == null &&
+                inc.status == (newP.size() >= inc.maxPlayers ? 'full' : 'waiting') &&
+                hasMonotonicStateVersion(ext, inc)
+              ) ||
+              // Action 3: Existing Member Lobby Ready Toggle / Reconnect Sync
+              (
+                isMember &&
+                newP.size() == oldP.size() &&
+                !changed.hasAny(['gameRound', 'lastDiceRoll', 'lastMoveId', 'lastMovingPlayerUid', 'currentTurnIndex', 'turnStartTimestamp', 'turnDeadline']) &&
+                ext.status in ['waiting', 'full', 'playing'] &&
+                existingGameRound(inc) == existingGameRound(ext) &&
+                changed.hasOnly([
+                  'players', 'playerCount', 'maxPlayers', 'status',
+                  'winnerId', 'winnerName', 'playerPositions', 'presence',
+                  'disconnectedPlayerId', 'disconnectedPlayerName', 'reconnectionDeadline',
+                  'lastMoveSummary', 'stateVersion', 'updatedAt', 'serverUpdatedAt'
+                ]) &&
+                isValidReadyToggleRoster(oldP, newP, uid) &&
+                hostVal == ext.hostId &&
+                sameWinnerId(ext, inc) &&
+                inc.status == (ext.status == 'playing' ? 'playing' : (newP.size() >= inc.maxPlayers ? 'full' : 'waiting')) &&
+                (
+                  !changed.hasAny(['disconnectedPlayerId']) ||
+                  (('disconnectedPlayerId' in ext) && ext.disconnectedPlayerId == uid && inc.disconnectedPlayerId == null && inc.reconnectionDeadline == null)
+                ) &&
+                hasMonotonicStateVersion(ext, inc)
+              ) ||
+              // Action 4: Host Start Game (waiting | full -> playing; requires >= 2 players & non-host ready)
+              (
+                ext.status in ['waiting', 'full'] &&
+                inc.status == 'playing' &&
+                ext.hostId == uid &&
+                changed.hasOnly([
+                  'status', 'players', 'playerCount', 'playerPositions',
+                  'currentTurnIndex', 'turnStartTimestamp', 'turnDeadline',
+                  'reconnectionDeadline', 'disconnectedPlayerId', 'disconnectedPlayerName',
+                  'lastMoveId', 'lastMovePath', 'lastMovingPlayerUid',
+                  'winnerId', 'winnerName', 'matchParticipantIds',
+                  'gameRound', 'stateVersion', 'lastMoveSummary', 'updatedAt', 'serverUpdatedAt'
+                ]) &&
+                hostVal == ext.hostId &&
+                oldP.size() >= 2 &&
+                oldP.size() <= ext.maxPlayers &&
+                areAllNonHostPlayersReady(oldP, ext.hostId) &&
+                sameRosterAllAtStart(oldP, newP) &&
+                inc.get('winnerId', null) == null &&
+                inc.get('winnerName', null) == null &&
+                ('gameRound' in inc) && inc.gameRound is number &&
+                int(inc.gameRound) == existingGameRound(ext) + 1 &&
+                hasMonotonicStateVersion(ext, inc)
+              ) ||
+              // Action 5: Snakes & Ladders Active Turn Dice Roll & Verified Tile Progression
+              (
+                ext.gameType == 'snakes_and_ladders' &&
+                ext.status == 'playing' &&
+                changed.hasAny(['lastDiceRoll', 'lastMoveId', 'lastMovingPlayerUid']) &&
+                changed.hasOnly([
+                  'players', 'playerPositions', 'presence',
+                  'lastDiceRoll', 'lastMoveSummary', 'lastMoveId', 'lastMoveTimestamp',
+                  'lastMovePath', 'lastMovingPlayerUid',
+                  'currentTurnIndex', 'turnStartTimestamp', 'turnDeadline',
+                  'stateVersion', 'status', 'winnerId', 'winnerName',
+                  'matchParticipantIds', 'updatedAt', 'serverUpdatedAt'
+                ]) &&
+                isValidSnakesActiveTurnMove(inc, ext, oldP, newP, uid)
+              ) ||
+              // Action 6: Snakes & Ladders Disconnect / Reconnection Timeout / Turn Timeout Recovery
+              (
+                ext.gameType == 'snakes_and_ladders' &&
+                isMember &&
+                newP.size() == oldP.size() &&
+                inc.status == ext.status &&
+                ext.status in ['waiting', 'full', 'playing'] &&
+                changed.hasOnly([
+                  'players', 'playerPositions', 'presence',
+                  'disconnectedPlayerId', 'disconnectedPlayerName', 'reconnectionDeadline',
+                  'currentTurnIndex', 'turnStartTimestamp', 'turnDeadline',
+                  'stateVersion', 'lastMoveSummary', 'updatedAt', 'serverUpdatedAt'
+                ]) &&
+                samePlayerRosterUids(oldP, newP) &&
+                samePlayerPositions(oldP, newP) &&
+                samePlayersReady(oldP, newP) &&
+                hostVal == ext.hostId &&
+                existingGameRound(inc) == existingGameRound(ext) &&
+                sameWinnerId(ext, inc) &&
+                (
+                  !changed.hasAny(['disconnectedPlayerId']) ||
+                  inc.disconnectedPlayerId == uid ||
+                  inc.disconnectedPlayerId == null
+                ) &&
+                hasMonotonicStateVersion(ext, inc)
+              ) ||
+              // Action 7: Member Leave Room (Self-Removal + Host Promotion; Snow Rush Never Sets Finished/Winner)
+              (
+                isMember &&
+                newP.size() == oldP.size() - 1 &&
+                oldP.size() >= 2 &&
+                changed.hasOnly([
+                  'players', 'playerCount', 'status', 'playerPositions',
+                  'hostId', 'hostName',
+                  'currentTurnIndex', 'turnStartTimestamp', 'turnDeadline',
+                  'winnerId', 'winnerName', 'matchParticipantIds',
+                  'disconnectedPlayerId', 'disconnectedPlayerName', 'reconnectionDeadline',
+                  'stateVersion', 'lastMoveSummary', 'updatedAt', 'serverUpdatedAt'
+                ]) &&
+                !isPlayerInList(newP, uid) &&
+                hasUniquePlayerUids(newP) &&
+                isPlayerInList(newP, hostVal) &&
+                allRemainingPreservePositions(newP, oldP) &&
+                (
+                  ext.hostId == uid
+                    ? hostVal == newP[0].uid
+                    : hostVal == ext.hostId
+                ) &&
+                existingGameRound(inc) == existingGameRound(ext) &&
+                (
+                  ext.gameType == 'snow_rush'
+                    ? (
+                      inc.get('winnerId', null) == null &&
+                      inc.get('winnerName', null) == null &&
+                      inc.status == (
+                        ext.status == 'playing'
+                          ? (newP.size() >= 2 ? 'playing' : 'waiting')
+                          : (newP.size() >= inc.maxPlayers ? 'full' : 'waiting')
+                      )
+                    )
+                    : isValidSnakesLeaveOutcome(ext, inc)
+                ) &&
+                hasMonotonicStateVersion(ext, inc)
+              ) ||
+              // Action 8: Snakes & Ladders Host Play Again Reset (finished -> waiting | full, gameRound + 1)
+              (
+                ext.gameType == 'snakes_and_ladders' &&
+                ext.status == 'finished' &&
+                ext.hostId == uid &&
+                changed.hasOnly([
+                  'players', 'playerCount', 'playerPositions', 'status',
+                  'currentTurnIndex', 'lastDiceRoll', 'gameRound', 'stateVersion',
+                  'lastMoveId', 'lastMovePath', 'lastMovingPlayerUid',
+                  'turnStartTimestamp', 'turnDeadline',
+                  'reconnectionDeadline', 'disconnectedPlayerId', 'disconnectedPlayerName',
+                  'lastMoveSummary', 'winnerId', 'winnerName', 'matchParticipantIds',
+                  'lastMoveTimestamp', 'updatedAt', 'serverUpdatedAt'
+                ]) &&
+                hostVal == ext.hostId &&
+                sameRosterAllAtStart(oldP, newP) &&
+                inc.status == (newP.size() >= inc.maxPlayers ? 'full' : 'waiting') &&
+                inc.get('winnerId', null) == null &&
+                inc.get('winnerName', null) == null &&
+                ('gameRound' in inc) && inc.gameRound is number &&
+                int(inc.gameRound) == existingGameRound(ext) + 1 &&
+                hasMonotonicStateVersion(ext, inc)
+              )
+            )
           )
         );
     }
 
-    function isValidMatchRewardClaim(data) {
+    function isValidMatchRewardClaim(rawData) {
+      let data = rawData;
       return data.keys().hasAll(['id', 'userId', 'roomId', 'gameRound', 'outcome', 'xpGranted', 'pointsGranted', 'createdAt', 'serverCreatedAt']) &&
         data.keys().hasOnly(['id', 'userId', 'roomId', 'gameRound', 'outcome', 'xpGranted', 'pointsGranted', 'createdAt', 'serverCreatedAt']) &&
         data.id is string && data.id.size() <= 128 &&
@@ -394,7 +916,8 @@ service cloud.firestore {
         data.serverCreatedAt == request.time;
     }
 
-    function isValidDailyClaim(data) {
+    function isValidDailyClaim(rawData) {
+      let data = rawData;
       return data.keys().hasAll(['id', 'userId', 'dayBucket', 'xpGranted', 'pointsGranted', 'createdAt', 'serverCreatedAt']) &&
         data.keys().hasOnly(['id', 'userId', 'dayBucket', 'xpGranted', 'pointsGranted', 'createdAt', 'serverCreatedAt']) &&
         data.id is string && data.id.size() <= 128 &&
@@ -406,7 +929,8 @@ service cloud.firestore {
         data.serverCreatedAt == request.time;
     }
 
-    function isValidAchievementClaim(data) {
+    function isValidAchievementClaim(rawData) {
+      let data = rawData;
       return data.keys().hasAll(['id', 'userId', 'achievementId', 'xpGranted', 'pointsGranted', 'createdAt', 'serverCreatedAt']) &&
         data.keys().hasOnly(['id', 'userId', 'achievementId', 'xpGranted', 'pointsGranted', 'createdAt', 'serverCreatedAt']) &&
         data.id is string && data.id.size() <= 128 &&
@@ -418,7 +942,8 @@ service cloud.firestore {
         data.serverCreatedAt == request.time;
     }
 
-    function isValidTransaction(data) {
+    function isValidTransaction(rawData) {
+      let data = rawData;
       return data.keys().hasAll(['id', 'userId', 'type', 'amount', 'description', 'createdAt']) &&
         data.keys().hasOnly(['id', 'userId', 'type', 'amount', 'xpAmount', 'description', 'createdAt']) &&
         data.id is string && data.id.size() <= 128 &&
@@ -431,7 +956,8 @@ service cloud.firestore {
     }
 
     // Verified Match Outcome Relational Helper (Phase 1: Restricted strictly to snakes_and_ladders)
-    function isServerVerifiedMatchReward(claim) {
+    function isServerVerifiedMatchReward(rawClaim) {
+      let claim = rawClaim;
       let room = get(/databases/$(database)/documents/rooms/$(claim.roomId)).data;
       let roomRound = ('gameRound' in room && room.gameRound is number) ? int(room.gameRound) : 1;
       let isParticipant =
@@ -451,7 +977,8 @@ service cloud.firestore {
     }
 
     // Verified Achievement Eligibility Helper
-    function isServerVerifiedAchievementReward(claim) {
+    function isServerVerifiedAchievementReward(rawClaim) {
+      let claim = rawClaim;
       let user = get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
       return (claim.achievementId == 'first_win' && user.totalWins >= 1 && claim.xpGranted == 150 && claim.pointsGranted == 100) ||
         (claim.achievementId == 'win_5' && user.totalWins >= 5 && claim.xpGranted == 400 && claim.pointsGranted == 300) ||
@@ -463,117 +990,8 @@ service cloud.firestore {
     match /users/{userId} {
       allow get: if isSignedIn() && isValidId(userId);
       allow list: if isSignedIn();
-
-      allow create: if isOwner(userId) &&
-        isValidId(userId) &&
-        isValidUserCreateKeys(incoming()) &&
-        isValidUser(incoming()) &&
-        incoming().level == 1 &&
-        incoming().xp == 0 &&
-        incoming().totalXp == 0 &&
-        incoming().points == 500 &&
-        incoming().currentPoints == 500 &&
-        incoming().totalPointsEarned == 500 &&
-        incoming().totalWins == 0 &&
-        incoming().totalGames == 0;
-
-      allow update: if isOwner(userId) &&
-        isValidId(userId) &&
-        isValidUser(incoming()) &&
-        incoming().id == existing().id &&
-        incoming().playerId == existing().playerId && (
-          // Action 1: Non-Economy Profile, Cosmetic Equip, or Active Room Session Update
-          (
-            incoming().diff(existing()).affectedKeys().hasOnly([
-              'displayName', 'photoURL',
-              'activeFrame', 'activeBoardSkin', 'activeDiceSkin', 'activeTokenSkin',
-              'activeRoomId', 'activeRoomCode', 'activeGameType',
-              'updatedAt'
-            ])
-          ) ||
-          // Action 2: One-Time Backward-Compatible Normalization for Pre-Upgrade Accounts
-          (
-            (!('totalXp' in existing()) || !('totalPointsEarned' in existing()) || !('currentPoints' in existing())) &&
-            incoming().diff(existing()).affectedKeys().hasOnly([
-              'totalXp', 'level', 'xp', 'points', 'currentPoints', 'totalPointsEarned', 'updatedAt'
-            ]) &&
-            int(incoming().points) == int(existing().points) &&
-            int(incoming().currentPoints) == int(existing().points) &&
-            int(incoming().totalPointsEarned) == existingTotalPointsEarnedRule(existing()) &&
-            int(incoming().totalXp) == existingTotalXpRule(existing()) &&
-            int(incoming().level) == computeLevelRule(incoming().totalXp) &&
-            int(incoming().xp) == computeCurrentLevelXpRule(incoming().totalXp)
-          ) ||
-          // Action 3: Server-Verified Atomic Match Reward Claim (+100 XP/+1000 Pts Win, +75 XP/+500 Pts Loss)
-          (
-            incoming().diff(existing()).affectedKeys().hasOnly([
-              'totalXp', 'level', 'xp', 'points', 'currentPoints', 'totalPointsEarned',
-              'totalGames', 'totalWins', 'lastClaimId', 'updatedAt'
-            ]) &&
-            incoming().lastClaimId is string && isValidId(incoming().lastClaimId) &&
-            !exists(/databases/$(database)/documents/reward_claims/$(incoming().lastClaimId)) &&
-            existsAfter(/databases/$(database)/documents/reward_claims/$(incoming().lastClaimId)) &&
-            getAfter(/databases/$(database)/documents/reward_claims/$(incoming().lastClaimId)).data.userId == userId &&
-            int(incoming().totalXp) == existingTotalXpRule(existing()) + getAfter(/databases/$(database)/documents/reward_claims/$(incoming().lastClaimId)).data.xpGranted &&
-            int(incoming().level) == computeLevelRule(incoming().totalXp) &&
-            int(incoming().xp) == computeCurrentLevelXpRule(incoming().totalXp) &&
-            int(incoming().points) == existingCurrentPointsRule(existing()) + getAfter(/databases/$(database)/documents/reward_claims/$(incoming().lastClaimId)).data.pointsGranted &&
-            int(incoming().currentPoints) == int(incoming().points) &&
-            int(incoming().totalPointsEarned) == existingTotalPointsEarnedRule(existing()) + getAfter(/databases/$(database)/documents/reward_claims/$(incoming().lastClaimId)).data.pointsGranted &&
-            int(incoming().totalGames) == int(existing().totalGames) + 1 &&
-            int(incoming().totalWins) == int(existing().totalWins) + (getAfter(/databases/$(database)/documents/reward_claims/$(incoming().lastClaimId)).data.outcome == 'win' ? 1 : 0)
-          ) ||
-          // Action 4: Server-Verified Atomic Daily Login Reward Claim
-          (
-            incoming().diff(existing()).affectedKeys().hasOnly([
-              'totalXp', 'level', 'xp', 'points', 'currentPoints', 'totalPointsEarned',
-              'lastDailyClaimId', 'updatedAt'
-            ]) &&
-            incoming().lastDailyClaimId is string && isValidId(incoming().lastDailyClaimId) &&
-            !exists(/databases/$(database)/documents/daily_claims/$(incoming().lastDailyClaimId)) &&
-            existsAfter(/databases/$(database)/documents/daily_claims/$(incoming().lastDailyClaimId)) &&
-            getAfter(/databases/$(database)/documents/daily_claims/$(incoming().lastDailyClaimId)).data.userId == userId &&
-            int(incoming().totalXp) == existingTotalXpRule(existing()) + getAfter(/databases/$(database)/documents/daily_claims/$(incoming().lastDailyClaimId)).data.xpGranted &&
-            int(incoming().level) == computeLevelRule(incoming().totalXp) &&
-            int(incoming().xp) == computeCurrentLevelXpRule(incoming().totalXp) &&
-            int(incoming().points) == existingCurrentPointsRule(existing()) + getAfter(/databases/$(database)/documents/daily_claims/$(incoming().lastDailyClaimId)).data.pointsGranted &&
-            int(incoming().currentPoints) == int(incoming().points) &&
-            int(incoming().totalPointsEarned) == existingTotalPointsEarnedRule(existing()) + getAfter(/databases/$(database)/documents/daily_claims/$(incoming().lastDailyClaimId)).data.pointsGranted
-          ) ||
-          // Action 5: Server-Verified Atomic Achievement Reward Claim
-          (
-            incoming().diff(existing()).affectedKeys().hasOnly([
-              'totalXp', 'level', 'xp', 'points', 'currentPoints', 'totalPointsEarned',
-              'claimedAchievements', 'lastAchievementClaimId', 'updatedAt'
-            ]) &&
-            incoming().lastAchievementClaimId is string && isValidId(incoming().lastAchievementClaimId) &&
-            !exists(/databases/$(database)/documents/achievement_claims/$(incoming().lastAchievementClaimId)) &&
-            existsAfter(/databases/$(database)/documents/achievement_claims/$(incoming().lastAchievementClaimId)) &&
-            getAfter(/databases/$(database)/documents/achievement_claims/$(incoming().lastAchievementClaimId)).data.userId == userId &&
-            int(incoming().totalXp) == existingTotalXpRule(existing()) + getAfter(/databases/$(database)/documents/achievement_claims/$(incoming().lastAchievementClaimId)).data.xpGranted &&
-            int(incoming().level) == computeLevelRule(incoming().totalXp) &&
-            int(incoming().xp) == computeCurrentLevelXpRule(incoming().totalXp) &&
-            int(incoming().points) == existingCurrentPointsRule(existing()) + getAfter(/databases/$(database)/documents/achievement_claims/$(incoming().lastAchievementClaimId)).data.pointsGranted &&
-            int(incoming().currentPoints) == int(incoming().points) &&
-            int(incoming().totalPointsEarned) == existingTotalPointsEarnedRule(existing()) + getAfter(/databases/$(database)/documents/achievement_claims/$(incoming().lastAchievementClaimId)).data.pointsGranted
-          ) ||
-          // Action 6: Shop Item Purchase (Deducts ONLY Current Points; Total Points Earned & XP/Level Unchanged!)
-          (
-            incoming().diff(existing()).affectedKeys().hasOnly([
-              'points', 'currentPoints', 'totalPointsEarned',
-              'totalXp', 'level', 'xp', 'inventory', 'updatedAt'
-            ]) &&
-            incoming().inventory.size() == existing().inventory.size() + 1 &&
-            int(incoming().points) <= existingCurrentPointsRule(existing()) &&
-            int(incoming().points) >= 0 &&
-            int(incoming().currentPoints) == int(incoming().points) &&
-            int(incoming().totalPointsEarned) == existingTotalPointsEarnedRule(existing()) &&
-            int(incoming().totalXp) == existingTotalXpRule(existing()) &&
-            int(incoming().level) == computeLevelRule(incoming().totalXp) &&
-            int(incoming().xp) == computeCurrentLevelXpRule(incoming().totalXp)
-          )
-        );
-
+      allow create: if canCreateUser(userId);
+      allow update: if canUpdateUser(userId);
       allow delete: if isOwner(userId) && isValidId(userId);
     }
 
@@ -581,234 +999,8 @@ service cloud.firestore {
     match /rooms/{roomId} {
       allow get: if isSignedIn() && isValidId(roomId);
       allow list: if isSignedIn() && resource.data.status in ['waiting', 'full', 'playing', 'finished'];
-
-      allow create: if isSignedIn() &&
-        isValidId(roomId) &&
-        isValidGameRoom(incoming()) &&
-        incoming().id == roomId &&
-        roomId == 'room_' + incoming().roomCode &&
-        incoming().hostId == request.auth.uid &&
-        incoming().status == 'waiting' &&
-        (!('winnerId' in incoming()) || incoming().winnerId == null) &&
-        (!('winnerName' in incoming()) || incoming().winnerName == null) &&
-        incoming().players.size() == 1 &&
-        incoming().players[0].uid == request.auth.uid &&
-        incoming().players[0].position == 1 &&
-        (!('playerCount' in incoming()) || incoming().playerCount == 1) &&
-        ('gameRound' in incoming()) && incoming().gameRound == 1 &&
-        ('stateVersion' in incoming()) && incoming().stateVersion == 1 &&
-        (!('timestamp' in incoming()) || incoming().timestamp == request.time) &&
-        (!('serverUpdatedAt' in incoming()) || incoming().serverUpdatedAt == request.time);
-
-      allow update: if isSignedIn() &&
-        isValidId(roomId) &&
-        isValidGameRoom(incoming()) &&
-        // Universal Immutable Room Identity Fields
-        incoming().id == existing().id &&
-        incoming().roomCode == existing().roomCode &&
-        incoming().gameType == existing().gameType &&
-        incoming().maxPlayers == existing().maxPlayers &&
-        (!('createdAt' in existing()) ? !('createdAt' in incoming()) : incoming().createdAt == existing().createdAt) && (
-          // Action 1: Member-Only Isolated Presence Heartbeat
-          (
-            isPlayerInList(existing().players, request.auth.uid) &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['presence']) &&
-            incoming().presence is map &&
-            (
-              !('presence' in existing()) ||
-              !(existing().presence is map) ||
-              incoming().presence.diff(existing().presence).affectedKeys().hasOnly([request.auth.uid])
-            )
-          ) ||
-          // Action 2: New Player Join Waiting Room (Appends Self Only)
-          (
-            existing().status in ['waiting', 'full'] &&
-            !isPlayerInList(existing().players, request.auth.uid) &&
-            existing().players.size() >= 1 &&
-            existing().players.size() < existing().maxPlayers &&
-            preserveExistingPlayersOnJoin(existing().players, incoming().players, request.auth.uid) &&
-            incoming().hostId == existing().hostId &&
-            existingGameRound(incoming()) == existingGameRound(existing()) &&
-            (!('winnerId' in incoming()) || incoming().winnerId == null) &&
-            (!('winnerName' in incoming()) || incoming().winnerName == null) &&
-            incoming().status == (incoming().players.size() >= incoming().maxPlayers ? 'full' : 'waiting') &&
-            hasMonotonicStateVersion(existing(), incoming()) &&
-            incoming().diff(existing()).affectedKeys().hasOnly([
-              'players', 'playerCount', 'maxPlayers', 'status',
-              'winnerId', 'winnerName', 'playerPositions', 'presence',
-              'stateVersion', 'lastMoveSummary', 'updatedAt', 'serverUpdatedAt'
-            ])
-          ) ||
-          // Action 3: Existing Member Lobby Ready Toggle / Reconnect Sync
-          (
-            isPlayerInList(existing().players, request.auth.uid) &&
-            existing().status in ['waiting', 'full', 'playing'] &&
-            samePlayerRosterUids(existing().players, incoming().players) &&
-            samePlayerPositions(existing().players, incoming().players) &&
-            onlyCallerChangedReady(existing().players, incoming().players, request.auth.uid) &&
-            incoming().hostId == existing().hostId &&
-            existingGameRound(incoming()) == existingGameRound(existing()) &&
-            sameWinnerId(existing(), incoming()) &&
-            incoming().status == (existing().status == 'playing' ? 'playing' : (incoming().players.size() >= incoming().maxPlayers ? 'full' : 'waiting')) &&
-            (
-              !incoming().diff(existing()).affectedKeys().hasAny(['disconnectedPlayerId']) ||
-              (('disconnectedPlayerId' in existing()) && existing().disconnectedPlayerId == request.auth.uid && incoming().disconnectedPlayerId == null && incoming().reconnectionDeadline == null)
-            ) &&
-            hasMonotonicStateVersion(existing(), incoming()) &&
-            incoming().diff(existing()).affectedKeys().hasOnly([
-              'players', 'playerCount', 'maxPlayers', 'status',
-              'winnerId', 'winnerName', 'playerPositions', 'presence',
-              'disconnectedPlayerId', 'disconnectedPlayerName', 'reconnectionDeadline',
-              'lastMoveSummary', 'stateVersion', 'updatedAt', 'serverUpdatedAt'
-            ])
-          ) ||
-          // Action 4: Host Start Game (waiting | full -> playing; requires >= 2 players & non-host ready)
-          (
-            existing().hostId == request.auth.uid &&
-            incoming().hostId == existing().hostId &&
-            existing().status in ['waiting', 'full'] &&
-            incoming().status == 'playing' &&
-            existing().players.size() >= 2 &&
-            existing().players.size() <= existing().maxPlayers &&
-            areAllNonHostPlayersReady(existing().players, existing().hostId) &&
-            samePlayerRosterUids(existing().players, incoming().players) &&
-            allPlayersAtStartPosition(incoming().players) &&
-            (!('winnerId' in incoming()) || incoming().winnerId == null) &&
-            (!('winnerName' in incoming()) || incoming().winnerName == null) &&
-            ('gameRound' in incoming()) && incoming().gameRound is number &&
-            int(incoming().gameRound) == existingGameRound(existing()) + 1 &&
-            hasMonotonicStateVersion(existing(), incoming()) &&
-            incoming().diff(existing()).affectedKeys().hasOnly([
-              'status', 'players', 'playerCount', 'playerPositions',
-              'currentTurnIndex', 'turnStartTimestamp', 'turnDeadline',
-              'reconnectionDeadline', 'disconnectedPlayerId', 'disconnectedPlayerName',
-              'lastMoveId', 'lastMovePath', 'lastMovingPlayerUid',
-              'winnerId', 'winnerName', 'matchParticipantIds',
-              'gameRound', 'stateVersion', 'lastMoveSummary', 'updatedAt', 'serverUpdatedAt'
-            ])
-          ) ||
-          // Action 5: Snakes & Ladders Active Turn Dice Roll & Verified Tile Progression
-          (
-            existing().gameType == 'snakes_and_ladders' &&
-            existing().status == 'playing' &&
-            (!('winnerId' in existing()) || existing().winnerId == null) &&
-            isCurrentTurnPlayer(existing(), request.auth.uid) &&
-            samePlayerRosterUids(existing().players, incoming().players) &&
-            nonTurnPlayerPositionsUnchanged(existing().players, incoming().players, int(existing().currentTurnIndex)) &&
-            isValidSnakesTurnPositionStep(
-              existing().players[int(existing().currentTurnIndex)].position,
-              incoming().players[int(existing().currentTurnIndex)].position
-            ) &&
-            incoming().lastDiceRoll is number && incoming().lastDiceRoll >= 1 && incoming().lastDiceRoll <= 6 &&
-            incoming().lastMovingPlayerUid == request.auth.uid &&
-            incoming().hostId == existing().hostId &&
-            existingGameRound(incoming()) == existingGameRound(existing()) &&
-            (
-              incoming().status == 'playing'
-                ? ((!('winnerId' in incoming()) || incoming().winnerId == null) && (!('winnerName' in incoming()) || incoming().winnerName == null))
-                : (
-                  incoming().status == 'finished' &&
-                  incoming().winnerId == request.auth.uid &&
-                  existing().players[int(existing().currentTurnIndex)].position >= 94 &&
-                  incoming().players[int(existing().currentTurnIndex)].position == 100
-                )
-            ) &&
-            hasMonotonicStateVersion(existing(), incoming()) &&
-            incoming().diff(existing()).affectedKeys().hasOnly([
-              'players', 'playerPositions', 'presence',
-              'lastDiceRoll', 'lastMoveSummary', 'lastMoveId', 'lastMoveTimestamp',
-              'lastMovePath', 'lastMovingPlayerUid',
-              'currentTurnIndex', 'turnStartTimestamp', 'turnDeadline',
-              'stateVersion', 'status', 'winnerId', 'winnerName',
-              'matchParticipantIds', 'updatedAt', 'serverUpdatedAt'
-            ])
-          ) ||
-          // Action 6: Snakes & Ladders Disconnect / Reconnection Timeout / Turn Timeout Recovery
-          (
-            existing().gameType == 'snakes_and_ladders' &&
-            isPlayerInList(existing().players, request.auth.uid) &&
-            existing().status in ['waiting', 'full', 'playing'] &&
-            incoming().status == existing().status &&
-            samePlayerRosterUids(existing().players, incoming().players) &&
-            samePlayerPositions(existing().players, incoming().players) &&
-            samePlayersReady(existing().players, incoming().players) &&
-            incoming().hostId == existing().hostId &&
-            existingGameRound(incoming()) == existingGameRound(existing()) &&
-            sameWinnerId(existing(), incoming()) &&
-            (
-              !incoming().diff(existing()).affectedKeys().hasAny(['disconnectedPlayerId']) ||
-              incoming().disconnectedPlayerId == request.auth.uid ||
-              incoming().disconnectedPlayerId == null
-            ) &&
-            hasMonotonicStateVersion(existing(), incoming()) &&
-            incoming().diff(existing()).affectedKeys().hasOnly([
-              'players', 'playerPositions', 'presence',
-              'disconnectedPlayerId', 'disconnectedPlayerName', 'reconnectionDeadline',
-              'currentTurnIndex', 'turnStartTimestamp', 'turnDeadline',
-              'stateVersion', 'lastMoveSummary', 'updatedAt', 'serverUpdatedAt'
-            ])
-          ) ||
-          // Action 7: Member Leave Room (Self-Removal + Host Promotion; Snow Rush Never Sets Finished/Winner)
-          (
-            isPlayerInList(existing().players, request.auth.uid) &&
-            !isPlayerInList(incoming().players, request.auth.uid) &&
-            existing().players.size() >= 2 &&
-            incoming().players.size() == existing().players.size() - 1 &&
-            allRemainingPreservePositions(incoming().players, existing().players) &&
-            (
-              existing().hostId == request.auth.uid
-                ? incoming().hostId == incoming().players[0].uid
-                : incoming().hostId == existing().hostId
-            ) &&
-            existingGameRound(incoming()) == existingGameRound(existing()) &&
-            (
-              existing().gameType == 'snow_rush'
-                ? (
-                  (!('winnerId' in incoming()) || incoming().winnerId == null) &&
-                  (!('winnerName' in incoming()) || incoming().winnerName == null) &&
-                  incoming().status == (
-                    existing().status == 'playing'
-                      ? (incoming().players.size() >= 2 ? 'playing' : 'waiting')
-                      : (incoming().players.size() >= incoming().maxPlayers ? 'full' : 'waiting')
-                  )
-                )
-                : isValidSnakesLeaveOutcome(existing(), incoming())
-            ) &&
-            hasMonotonicStateVersion(existing(), incoming()) &&
-            incoming().diff(existing()).affectedKeys().hasOnly([
-              'players', 'playerCount', 'status', 'playerPositions',
-              'hostId', 'hostName',
-              'currentTurnIndex', 'turnStartTimestamp', 'turnDeadline',
-              'winnerId', 'winnerName', 'matchParticipantIds',
-              'disconnectedPlayerId', 'disconnectedPlayerName', 'reconnectionDeadline',
-              'stateVersion', 'lastMoveSummary', 'updatedAt', 'serverUpdatedAt'
-            ])
-          ) ||
-          // Action 8: Snakes & Ladders Host Play Again Reset (finished -> waiting | full, gameRound + 1)
-          (
-            existing().gameType == 'snakes_and_ladders' &&
-            existing().status == 'finished' &&
-            existing().hostId == request.auth.uid &&
-            incoming().hostId == existing().hostId &&
-            samePlayerRosterUids(existing().players, incoming().players) &&
-            allPlayersAtStartPosition(incoming().players) &&
-            incoming().status == (incoming().players.size() >= incoming().maxPlayers ? 'full' : 'waiting') &&
-            (!('winnerId' in incoming()) || incoming().winnerId == null) &&
-            (!('winnerName' in incoming()) || incoming().winnerName == null) &&
-            ('gameRound' in incoming()) && incoming().gameRound is number &&
-            int(incoming().gameRound) == existingGameRound(existing()) + 1 &&
-            hasMonotonicStateVersion(existing(), incoming()) &&
-            incoming().diff(existing()).affectedKeys().hasOnly([
-              'players', 'playerCount', 'playerPositions', 'status',
-              'currentTurnIndex', 'lastDiceRoll', 'gameRound', 'stateVersion',
-              'lastMoveId', 'lastMovePath', 'lastMovingPlayerUid',
-              'turnStartTimestamp', 'turnDeadline',
-              'reconnectionDeadline', 'disconnectedPlayerId', 'disconnectedPlayerName',
-              'lastMoveSummary', 'winnerId', 'winnerName', 'matchParticipantIds',
-              'lastMoveTimestamp', 'updatedAt', 'serverUpdatedAt'
-            ])
-          )
-        );
+      allow create: if canCreateGameRoom(roomId);
+      allow update: if canUpdateGameRoom(roomId);
 
       allow delete: if isSignedIn() &&
         isValidId(roomId) &&

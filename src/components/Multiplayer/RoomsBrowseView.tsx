@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { collection, query, where, onSnapshot } from 'firebase/firestore';
-import { db } from '../../lib/firebase';
+import { db, extractFirebaseErrorCode } from '../../lib/firebase';
 import {
   DEFAULT_GAME_ID,
   RegisteredGameId,
@@ -104,7 +104,9 @@ export const RoomsBrowseView: React.FC<RoomsBrowseViewProps> = ({ onEnterRoom })
         setLoading(false);
       },
       (error) => {
-        console.error('Browse rooms listener error:', error);
+        console.error('Browse rooms listener error:', {
+          errorCode: extractFirebaseErrorCode(error),
+        });
         if (isMountedRef.current) {
           setLoading(false);
         }
