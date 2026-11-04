@@ -671,6 +671,10 @@ async function runTests(): Promise<void> {
         props: { status: 'error', errorCode: 'WS_UNCONFIGURED' },
         expectedSubstring: 'Multiplayer Server မသတ်မှတ်ရသေးပါ',
       },
+      {
+        props: { status: 'error', errorCode: 'CONNECTION_FAILED' },
+        expectedSubstring: 'Multiplayer Server ချိတ်ဆက်မှု မအောင်မြင်ပါ',
+      },
     ];
 
     for (const item of statesToVerify) {
@@ -685,6 +689,19 @@ async function runTests(): Promise<void> {
       );
       assert.ok(bannerHtml.includes(item.expectedSubstring));
     }
+
+    assert.equal(
+      resolveNetworkBannerDescriptor({ status: 'error', errorCode: 'WS_UNCONFIGURED' })
+        .canManualRetry,
+      false,
+      'WS_UNCONFIGURED must not expose manual retry'
+    );
+    assert.equal(
+      resolveNetworkBannerDescriptor({ status: 'error', errorCode: 'CONNECTION_FAILED' })
+        .canManualRetry,
+      true,
+      'CONNECTION_FAILED must expose manual retry button when Worker URL is configured'
+    );
 
     // Verify terminal 4401 / 4403 / 4404 close codes do NOT schedule reconnect loops
     const createdSockets: MockWebSocket[] = [];

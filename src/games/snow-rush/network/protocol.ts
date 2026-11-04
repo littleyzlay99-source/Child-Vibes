@@ -19,6 +19,16 @@ import type {
 
 export const SNOW_RUSH_PROTOCOL_VERSION = 1 as const;
 
+/**
+ * Canonical public Cloudflare Worker base URL for Snow Rush Online Multiplayer in production.
+ * Public endpoint only (zero secrets); used as a safe production fallback when `.env.production`
+ * is excluded by GitHub sync or shadowed by an empty CI environment variable.
+ */
+export const SNOW_RUSH_PRODUCTION_WORKER_BASE_URL =
+  'https://child-vibes-snow-rush-server.littleyzlay99.workers.dev' as const;
+
+declare const __SNOW_RUSH_CONFIGURED_WS_URL__: string | undefined;
+
 /** Maximum allowed inbound UTF-8 WebSocket frame size (2 KB). */
 export const SNOW_RUSH_WS_MAX_MESSAGE_BYTES = 2048;
 
@@ -430,18 +440,49 @@ export function parseSnowRushServerMessage(rawText: string): SnowRushServerMessa
   }
 }
 
-function readConfiguredSnowRushWorkerBaseUrl(explicitBaseUrl?: string | null): string | null {
+export function readConfiguredSnowRushWorkerBaseUrl(
+  explicitBaseUrl?: string | null,
+  options?: { readonly isProductionBuild?: boolean }
+): string | null {
   let rawBase = '';
   if (explicitBaseUrl !== undefined) {
     rawBase = explicitBaseUrl ?? '';
   } else {
+    let buildDefinedUrl = '';
+    if (
+      typeof __SNOW_RUSH_CONFIGURED_WS_URL__ === 'string' &&
+      __SNOW_RUSH_CONFIGURED_WS_URL__.trim().length > 0
+    ) {
+      buildDefinedUrl = __SNOW_RUSH_CONFIGURED_WS_URL__.trim();
+    }
+
+    let metaEnvUrl = '';
+    let isProdBuild = options?.isProductionBuild === true;
     try {
-      const metaEnv = (import.meta as unknown as { env?: Record<string, unknown> }).env;
+      const metaEnv = (
+        import.meta as unknown as {
+          readonly env?: {
+            readonly VITE_SNOW_RUSH_WS_URL?: unknown;
+            readonly PROD?: unknown;
+          };
+        }
+      ).env;
       if (metaEnv && typeof metaEnv.VITE_SNOW_RUSH_WS_URL === 'string') {
-        rawBase = metaEnv.VITE_SNOW_RUSH_WS_URL;
+        metaEnvUrl = metaEnv.VITE_SNOW_RUSH_WS_URL.trim();
+      }
+      if (options?.isProductionBuild === undefined && metaEnv?.PROD === true) {
+        isProdBuild = true;
       }
     } catch {
-      rawBase = '';
+      metaEnvUrl = '';
+    }
+
+    if (buildDefinedUrl.length > 0) {
+      rawBase = buildDefinedUrl;
+    } else if (metaEnvUrl.length > 0) {
+      rawBase = metaEnvUrl;
+    } else if (isProdBuild) {
+      rawBase = SNOW_RUSH_PRODUCTION_WORKER_BASE_URL;
     }
   }
 

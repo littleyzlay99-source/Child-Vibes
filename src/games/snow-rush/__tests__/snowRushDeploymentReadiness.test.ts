@@ -18,9 +18,14 @@ import type {
   SnowRushWorkerEnv,
 } from '../../../../workers/snow-rush-server/src/cloudflareTypes';
 import {
+  readConfiguredSnowRushWorkerBaseUrl,
   resolveSnowRushWorkerHealthUrl,
   resolveSnowRushWorkerWsUrl,
+  SNOW_RUSH_PRODUCTION_WORKER_BASE_URL,
 } from '../network/protocol';
+import { SnowRushSocketClient, type SnowRushSocketLike } from '../network/SnowRushSocketClient';
+import { SnowRushMultiplayerView } from '../SnowRushMultiplayerView';
+import { resolveViteSnowRushWsUrl } from '../../../../vite.config';
 import { SnowRushPrivateTestViewContent } from '../SnowRushPrivateTestView';
 import {
   buildPrivateSnowRushRoomPayload,
@@ -656,8 +661,191 @@ async function runStep49ReadinessSuite(): Promise<void> {
     passed += 1;
   }
 
+  // 8. Public Multiplayer Worker URL Resolution, Cloudflare Pages Empty-Env Fallback & Bundle Check
+  {
+    const EXPECTED_PROD_WORKER_URL =
+      'https://child-vibes-snow-rush-server.littleyzlay99.workers.dev';
+
+    assert(
+      SNOW_RUSH_PRODUCTION_WORKER_BASE_URL === EXPECTED_PROD_WORKER_URL,
+      'SNOW_RUSH_PRODUCTION_WORKER_BASE_URL must match production Worker URL'
+    );
+    assert(
+      resolveViteSnowRushWsUrl('production', undefined, undefined) === EXPECTED_PROD_WORKER_URL,
+      'Production Vite build must resolve Worker URL even when .env.production is absent on GitHub'
+    );
+    assert(
+      resolveViteSnowRushWsUrl('production', '', '') === EXPECTED_PROD_WORKER_URL,
+      'Production Vite build must resolve Worker URL even when Cloudflare Pages env var is empty string'
+    );
+    assert(
+      resolveViteSnowRushWsUrl('production', EXPECTED_PROD_WORKER_URL, 'https://override.workers.dev') ===
+        'https://override.workers.dev',
+      'Non-empty process.env.VITE_SNOW_RUSH_WS_URL override must take precedence when provided'
+    );
+    assert(
+      readConfiguredSnowRushWorkerBaseUrl(undefined, { isProductionBuild: true }) ===
+        EXPECTED_PROD_WORKER_URL,
+      'readConfiguredSnowRushWorkerBaseUrl must resolve production Worker URL in production builds'
+    );
+
+    // Public Module (`resolveGameModule('snow_rush')`) + Public Room (`room_PUB901`, 2-4 players)
+    const resolvedModule = resolveGameModule('snow_rush');
+    assert(resolvedModule.kind === 'resolved', 'snow_rush public module must resolve');
+
+    const publicRoom: GameRoom = {
+      id: 'room_PUB901',
+      roomCode: 'PUB901',
+      gameType: 'snow_rush',
+      hostId: 'uid_pub_host',
+      hostName: 'အောင်ကျော်',
+      status: 'playing',
+      maxPlayers: 4,
+      playerCount: 3,
+      players: [
+        {
+          uid: 'uid_pub_host',
+          playerId: 'CV200001',
+          displayName: 'အောင်ကျော်',
+          photoURL: '',
+          isReady: true,
+          color: '#EF4444',
+          position: 1,
+          isConnected: true,
+          lastSeen: 1000,
+        },
+        {
+          uid: 'uid_pub_p2',
+          playerId: 'CV200002',
+          displayName: 'မေသူ',
+          photoURL: '',
+          isReady: true,
+          color: '#0EA5E9',
+          position: 1,
+          isConnected: true,
+          lastSeen: 1000,
+        },
+        {
+          uid: 'uid_pub_p3',
+          playerId: 'CV200003',
+          displayName: 'သီဟ',
+          photoURL: '',
+          isReady: true,
+          color: '#10B981',
+          position: 1,
+          isConnected: true,
+          lastSeen: 1000,
+        },
+      ],
+      currentTurnIndex: 0,
+      lastDiceRoll: 0,
+      lastMoveSummary: '',
+      winnerId: null,
+      winnerName: null,
+      exactFinish: false,
+      gameRound: 1,
+      turnStartTimestamp: 1000,
+      turnDeadline: 31000,
+      reconnectionDeadline: null,
+      disconnectedPlayerId: null,
+      disconnectedPlayerName: null,
+      lastMoveTimestamp: 1000,
+      createdAt: '2026-04-08T00:00:00.000Z',
+      updatedAt: '2026-04-08T00:00:00.000Z',
+    };
+
+    const prodResolvedUrl = resolveViteSnowRushWsUrl('production', '', '');
+    const publicMultiplayerHtml = renderToStaticMarkup(
+      React.createElement(SnowRushMultiplayerView, {
+        room: publicRoom,
+        currentUserId: 'uid_pub_host',
+        currentUserDisplayName: 'အောင်ကျော်',
+        currentPlayer: publicRoom.players[0],
+        isHost: true,
+        isOnline: true,
+        reconnectCountdown: 0,
+        cosmetics: {
+          activeBoardSkin: 'classic',
+          activeDiceSkin: 'classic',
+          activeTokenSkin: 'classic',
+          activeFrame: 'none',
+        },
+        rewardOutcome: null,
+        fallbackProgress: {
+          level: 1,
+          totalXp: 0,
+          currentLevelXp: 0,
+          xpForNextLevel: 150,
+          xpRemainingForNextLevel: 150,
+          progressPercent: 0,
+          isMaxLevel: false,
+        },
+        isClaimingReward: false,
+        isExiting: false,
+        onCommitRoomState: () => {},
+        onTurnTimeout: async () => {},
+        onPlayAgain: async () => {},
+        onRequestExit: () => {},
+        onLeaveAfterFinish: async () => {},
+        workerBaseUrlOverride: prodResolvedUrl,
+      })
+    );
+
+    assert(
+      !publicMultiplayerHtml.includes('Online Multiplayer မချိတ်ဆက်ရသေးပါ') &&
+        !publicMultiplayerHtml.includes('Multiplayer Server မသတ်မှတ်ရသေးပါ'),
+      'Public SnowRushMultiplayerView MUST NOT render WS_UNCONFIGURED when production Worker URL is resolved'
+    );
+
+    // Verify SnowRushSocketClient initiates WebSocket to exact wss://.../ws/snow-rush/room_PUB901
+    const openedUrls: string[] = [];
+    const mockClient = new SnowRushSocketClient({
+      roomId: publicRoom.id,
+      workerBaseUrl: prodResolvedUrl,
+      maxReconnectAttempts: 0,
+      getIdToken: async () => 't'.repeat(64),
+      createWebSocket: (url): SnowRushSocketLike => {
+        openedUrls.push(url);
+        return {
+          readyState: 0,
+          onopen: null,
+          onmessage: null,
+          onclose: null,
+          onerror: null,
+          send: () => {},
+          close: () => {},
+        };
+      },
+    });
+    mockClient.connect();
+    assert(
+      openedUrls.length === 1 &&
+        openedUrls[0] ===
+          'wss://child-vibes-snow-rush-server.littleyzlay99.workers.dev/ws/snow-rush/room_PUB901',
+      'Public Room SnowRushSocketClient must initiate connection to wss://child-vibes-snow-rush-server.littleyzlay99.workers.dev/ws/snow-rush/room_PUB901'
+    );
+    mockClient.dispose();
+
+    // If dist/assets exists (after npm run build), verify compiled JS bundle embeds Worker hostname
+    const distAssetsDir = path.join(WORKSPACE_ROOT, 'dist/assets');
+    if (fs.existsSync(distAssetsDir)) {
+      const jsBundles = fs
+        .readdirSync(distAssetsDir)
+        .filter((f) => f.endsWith('.js'))
+        .map((f) => fs.readFileSync(path.join(distAssetsDir, f), 'utf8'));
+      assert(
+        jsBundles.some((content) =>
+          content.includes('child-vibes-snow-rush-server.littleyzlay99.workers.dev')
+        ),
+        'Compiled dist/assets/*.js bundle MUST contain child-vibes-snow-rush-server.littleyzlay99.workers.dev'
+      );
+    }
+
+    passed += 1;
+  }
+
   console.log(
-    `[SnowRush Step 4.9 Deployment Readiness Suite] ALL ${passed}/7 TEST GROUPS PASSED!`
+    `[SnowRush Step 4.9 Deployment Readiness Suite] ALL ${passed}/8 TEST GROUPS PASSED!`
   );
 }
 

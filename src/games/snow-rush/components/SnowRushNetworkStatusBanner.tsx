@@ -245,7 +245,10 @@ export function resolveNetworkBannerDescriptor(
   return {
     visible: true,
     tone: 'error',
-    headlineMm: 'Network ပြတ်တောက်နေသည်',
+    headlineMm:
+      errorCode === 'CONNECTION_FAILED'
+        ? 'Multiplayer Server ချိတ်ဆက်မှု မအောင်မြင်ပါ'
+        : 'Network ပြတ်တောက်နေသည်',
     detailMm: errInfo.detailMm,
     canManualRetry: true,
   };
