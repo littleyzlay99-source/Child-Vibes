@@ -11,6 +11,7 @@ import {
   extractFirebaseErrorCode,
   handleFirestoreError,
   OperationType,
+  redactFirestorePath,
 } from '../lib/firebase';
 import {
   DEFAULT_GAME_ID,
@@ -120,7 +121,7 @@ export function classifyRoomOperationError(
   const logSafeRoomDiagnostic = (category: RoomJoinErrorCode) => {
     console.warn('Room operation notice:', {
       operation,
-      path: roomPath,
+      path: redactFirestorePath(roomPath) ?? roomPath,
       firebaseCode: normalizedFirebaseCode,
       category,
       isAuthenticated: hasAuthenticatedUser,
@@ -481,6 +482,305 @@ export async function createGameRoom(
  * - Allows already-joined players to re-enter without false Room Full errors
  * - Validates capacity strictly against unique active players before adding new members
  */
+export type JoinRoomTransactionMutation =
+  | {
+      readonly kind: 'noop';
+      readonly result: JoinRoomResult;
+    }
+  | {
+      readonly kind: 'update';
+      readonly updates: Record<string, any>;
+      readonly result: JoinRoomResult;
+    };
+
+/**
+ * Pure, deterministic Join Room transaction planner shared by `joinGameRoomByCode()` and tests.
+ * - Preserves existing players, `hostId`, `id`, `roomCode`, `gameType`, and `maxPlayers` untouched
+ * - Appends ONLY the authenticated caller (`effectiveUid`) sanitized via `sanitizePlayer()`
+ * - Strictly requires `status === 'waiting'` and `uniquePlayers.length < maxPlayers` for new joins
+ */
+export function buildJoinRoomTransactionMutation(params: {
+  readonly roomId: string;
+  readonly roomData: GameRoom;
+  readonly effectiveUid: string;
+  readonly user: UserProfile;
+  readonly txNow?: number;
+}): JoinRoomTransactionMutation {
+  const { roomId, roomData, effectiveUid, user, txNow = Date.now() } = params;
+
+  const effectiveGameType =
+    typeof roomData.gameType === 'string' && roomData.gameType.trim()
+      ? roomData.gameType.trim()
+      : DEFAULT_GAME_ID;
+  const registryEntry = getGameById(effectiveGameType);
+  if (!registryEntry) {
+    throw new RoomJoinError(
+      'INVALID_GAME_TYPE',
+      'ဤအခန်း၏ ဂိမ်းအမျိုးအစားသည် စာရင်းသွင်းထားခြင်း မရှိပါ။'
+    );
+  }
+  if (registryEntry.status !== 'available') {
+    throw new RoomJoinError(
+      'GAME_UNAVAILABLE',
+      `${registryEntry.shortTitle} ဂိမ်းကို လက်ရှိတွင် ဝင်ရောက်ကစား၍ မရနိုင်သေးပါ။`
+    );
+  }
+
+  const maxPlayers = normalizeMaxPlayers(roomData.maxPlayers);
+  const isoNow = new Date(txNow).toISOString();
+
+  // Compute unique active players by UID (prevents duplicate IDs & Host double-count)
+  const rawPlayersLength = Array.isArray(roomData.players) ? roomData.players.length : 0;
+  const uniquePlayers = deduplicateRoomPlayers(
+    roomData.players,
+    roomData.playerPositions,
+    txNow
+  );
+  const hadDuplicateEntries = rawPlayersLength !== uniquePlayers.length;
+
+  // 1. Check if Player is ALREADY a member of this room FIRST (Idempotent Re-entry / Reconnect)
+  const existingIndex = uniquePlayers.findIndex((p) => p.uid === effectiveUid);
+  if (existingIndex >= 0) {
+    if (roomData.status === 'finished') {
+      throw new RoomJoinError('GAME_FINISHED', 'ဤဂိမ်းပွဲသည် ပြီးဆုံးသွားပါပြီ။');
+    }
+
+    const existingPlayer = uniquePlayers[existingIndex];
+    const expectedStatus: RoomStatus =
+      roomData.status === 'playing'
+        ? 'playing'
+        : computeLobbyStatus(uniquePlayers.length, maxPlayers);
+
+    const wasDisconnected =
+      existingPlayer.isConnected === false || roomData.disconnectedPlayerId === effectiveUid;
+    const needsMetadataSync =
+      hadDuplicateEntries ||
+      roomData.playerCount !== uniquePlayers.length ||
+      roomData.status !== expectedStatus;
+
+    // Zero-write fast path if player is already active & room metadata is already clean
+    if (!wasDisconnected && !needsMetadataSync) {
+      return {
+        kind: 'noop',
+        result: {
+          roomId,
+          room: {
+            ...roomData,
+            maxPlayers,
+            playerCount: uniquePlayers.length,
+            players: uniquePlayers,
+          },
+          alreadyJoined: true,
+        },
+      };
+    }
+
+    const baseExistingPlayers =
+      !hadDuplicateEntries && Array.isArray(roomData.players) ? roomData.players : uniquePlayers;
+    const updatedPlayers = baseExistingPlayers.map((p) =>
+      p.uid === effectiveUid
+        ? sanitizePlayer(p, txNow, {
+            isConnected: true,
+            lastSeen: txNow,
+            disconnectedAt: null,
+          })
+        : p
+    );
+    const nextStateVersion = (roomData.stateVersion || 1) + 1;
+    const updatedPositions = buildPlayerPositionsMap(updatedPlayers, txNow);
+    const nextPresenceEntry: PlayerPresenceEntry = {
+      isConnected: true,
+      lastSeen: txNow,
+      disconnectedAt: null,
+    };
+
+    const updates: Record<string, any> = {
+      players: updatedPlayers,
+      playerCount: updatedPlayers.length,
+      status: expectedStatus,
+      playerPositions: updatedPositions,
+      [`presence.${effectiveUid}`]: nextPresenceEntry,
+      stateVersion: nextStateVersion,
+      updatedAt: isoNow,
+    };
+
+    let nextSummary = roomData.lastMoveSummary;
+    let nextDiscId = roomData.disconnectedPlayerId;
+    let nextDiscName = roomData.disconnectedPlayerName;
+    let nextReconDeadline = roomData.reconnectionDeadline;
+
+    if (roomData.disconnectedPlayerId === effectiveUid) {
+      nextDiscId = null;
+      nextDiscName = null;
+      nextReconDeadline = null;
+      nextSummary = `ကစားသမား ${existingPlayer.displayName} ပြန်လည်ချိတ်ဆက်မိပါပြီ။`.slice(0, 500);
+      updates.disconnectedPlayerId = null;
+      updates.disconnectedPlayerName = null;
+      updates.reconnectionDeadline = null;
+      updates.lastMoveSummary = nextSummary;
+    }
+
+    const committedRoom: GameRoom = {
+      ...roomData,
+      maxPlayers,
+      playerCount: updatedPlayers.length,
+      status: expectedStatus,
+      players: updatedPlayers,
+      playerPositions: updatedPositions,
+      presence: {
+        ...(roomData.presence || {}),
+        [effectiveUid]: nextPresenceEntry,
+      },
+      disconnectedPlayerId: nextDiscId,
+      disconnectedPlayerName: nextDiscName,
+      reconnectionDeadline: nextReconDeadline,
+      lastMoveSummary: nextSummary,
+      stateVersion: nextStateVersion,
+      updatedAt: isoNow,
+    };
+
+    return {
+      kind: 'update',
+      updates,
+      result: {
+        roomId,
+        room: committedRoom,
+        alreadyJoined: true,
+      },
+    };
+  }
+
+  // 2. Validate room status & capacity strictly for NEW players
+  if (roomData.status === 'finished') {
+    throw new RoomJoinError('GAME_FINISHED', 'ဤဂိမ်းပွဲသည် ပြီးဆုံးသွားပါပြီ။');
+  }
+
+  if (roomData.status === 'playing') {
+    throw new RoomJoinError(
+      'GAME_PLAYING',
+      'ဂိမ်းစတင်နေပြီဖြစ်သောကြောင့် အခန်းသစ်သို့ ဝင်ရောက်၍ မရနိုင်ပါ။'
+    );
+  }
+
+  if (roomData.status === 'full' || uniquePlayers.length >= maxPlayers) {
+    throw new RoomJoinError(
+      'ROOM_FULL',
+      `အခန်းလူပြည့်နေပါသည် (အများဆုံး ${maxPlayers} ဦး ပြည့်နေပါပြီ)။`
+    );
+  }
+
+  if (roomData.status !== 'waiting') {
+    throw new RoomJoinError(
+      'FAILED_PRECONDITION',
+      'လက်ရှိအခန်းအခြေအနေတွင် ကစားသမားအသစ် ဝင်ရောက်၍ မရနိုင်ပါ။'
+    );
+  }
+
+  // 3. Assign unique token color & sanitize ONLY the newly joining player
+  const usedColors = uniquePlayers.map((p) => p.color);
+  const availableColor =
+    GAME_CONFIG.PLAYER_COLORS.find((c) => !usedColors.includes(c.hex))?.hex ||
+    GAME_CONFIG.PLAYER_COLORS[uniquePlayers.length % GAME_CONFIG.PLAYER_COLORS.length].hex;
+
+  const newPlayer = sanitizePlayer(
+    {
+      uid: effectiveUid,
+      playerId: user.playerId,
+      displayName: user.displayName,
+      photoURL: user.photoURL,
+      isReady: false,
+      color: availableColor,
+      position: 1,
+      positionVersion: 1,
+      lastMoveId: null,
+      updatedAtMs: txNow,
+      activeTokenSkin: user.activeTokenSkin || 'token_crown',
+      isConnected: true,
+      lastSeen: txNow,
+      disconnectedAt: null,
+    },
+    txNow
+  );
+
+  // Preserve existing players & their position entries 100% untouched on clean rooms
+  const preservedExistingPlayers =
+    !hadDuplicateEntries && Array.isArray(roomData.players)
+      ? roomData.players
+      : uniquePlayers;
+  const updatedPlayers = [...preservedExistingPlayers, newPlayer];
+  const newPlayerCount = updatedPlayers.length;
+  const nextStatus = computeLobbyStatus(newPlayerCount, maxPlayers);
+  const nextStateVersion = (roomData.stateVersion || 1) + 1;
+  const existingPosSource = roomData.playerPositions || {};
+  const updatedPositions: NonNullable<GameRoom['playerPositions']> = {};
+  for (const existingP of preservedExistingPlayers) {
+    updatedPositions[existingP.uid] = existingPosSource[existingP.uid] || {
+      position: existingP.position || 1,
+      positionVersion: existingP.positionVersion || 1,
+      lastMoveId: existingP.lastMoveId ?? null,
+      updatedAtMs: existingP.updatedAtMs || txNow,
+    };
+  }
+  updatedPositions[effectiveUid] = {
+    position: 1,
+    positionVersion: 1,
+    lastMoveId: null,
+    updatedAtMs: txNow,
+  };
+  const nextSummary = `${newPlayer.displayName} အခန်းသို့ ဝင်ရောက်လာခဲ့သည်။`.slice(0, 500);
+  const nextPresenceEntry: PlayerPresenceEntry = {
+    isConnected: true,
+    lastSeen: txNow,
+    disconnectedAt: null,
+  };
+
+  const updates: Record<string, any> = {
+    players: updatedPlayers,
+    playerCount: newPlayerCount,
+    status: nextStatus,
+    playerPositions: updatedPositions,
+    [`presence.${effectiveUid}`]: nextPresenceEntry,
+    stateVersion: nextStateVersion,
+    lastMoveSummary: nextSummary,
+    updatedAt: isoNow,
+  };
+
+  if (roomData.winnerId != null) {
+    updates.winnerId = null;
+  }
+  if (roomData.winnerName != null) {
+    updates.winnerName = null;
+  }
+
+  const committedRoom: GameRoom = {
+    ...roomData,
+    maxPlayers,
+    playerCount: newPlayerCount,
+    status: nextStatus,
+    winnerId: null,
+    winnerName: null,
+    players: updatedPlayers,
+    playerPositions: updatedPositions,
+    presence: {
+      ...(roomData.presence || {}),
+      [effectiveUid]: nextPresenceEntry,
+    },
+    stateVersion: nextStateVersion,
+    lastMoveSummary: nextSummary,
+    updatedAt: isoNow,
+  };
+
+  return {
+    kind: 'update',
+    updates,
+    result: {
+      roomId,
+      room: committedRoom,
+      alreadyJoined: false,
+    },
+  };
+}
+
 export async function joinGameRoomByCode(
   roomCodeInput: string,
   user: UserProfile
@@ -515,7 +815,6 @@ export async function joinGameRoomByCode(
         const txNow = Date.now();
         const roomSnap = await transaction.get(roomRef);
 
-        // 1. Verify room exists on server
         if (!roomSnap.exists()) {
           throw new RoomJoinError(
             'NOT_FOUND',
@@ -524,226 +823,24 @@ export async function joinGameRoomByCode(
         }
 
         const roomData = roomSnap.data() as GameRoom;
-        const maxPlayers = normalizeMaxPlayers(roomData.maxPlayers);
+        const mutation = buildJoinRoomTransactionMutation({
+          roomId,
+          roomData,
+          effectiveUid,
+          user,
+          txNow,
+        });
 
-        // 2. Compute unique active players by UID (prevents duplicate IDs & Host double-count)
-        const rawPlayersLength = Array.isArray(roomData.players) ? roomData.players.length : 0;
-        const uniquePlayers = deduplicateRoomPlayers(
-          roomData.players,
-          roomData.playerPositions,
-          txNow
-        );
-        const hadDuplicateEntries = rawPlayersLength !== uniquePlayers.length;
-
-        // 3. Check if Player is ALREADY a member of this room FIRST (Idempotent Re-entry / Reconnect)
-        const existingIndex = uniquePlayers.findIndex((p) => p.uid === effectiveUid);
-        if (existingIndex >= 0) {
-          if (roomData.status === 'finished') {
-            throw new RoomJoinError('GAME_FINISHED', 'ဤဂိမ်းပွဲသည် ပြီးဆုံးသွားပါပြီ။');
-          }
-
-          const existingPlayer = uniquePlayers[existingIndex];
-          const expectedStatus: RoomStatus =
-            roomData.status === 'playing'
-              ? 'playing'
-              : computeLobbyStatus(uniquePlayers.length, maxPlayers);
-
-          const wasDisconnected =
-            existingPlayer.isConnected === false || roomData.disconnectedPlayerId === effectiveUid;
-          const needsMetadataSync =
-            hadDuplicateEntries ||
-            roomData.playerCount !== uniquePlayers.length ||
-            roomData.status !== expectedStatus;
-
-          // Zero-write fast path if player is already active & room metadata is already clean
-          if (!wasDisconnected && !needsMetadataSync) {
-            return {
-              roomId,
-              room: {
-                ...roomData,
-                maxPlayers,
-                playerCount: uniquePlayers.length,
-                players: uniquePlayers,
-              },
-              alreadyJoined: true,
-            };
-          }
-
-          const updatedPlayers = uniquePlayers.map((p, idx) =>
-            idx === existingIndex
-              ? sanitizePlayer(p, txNow, {
-                  isConnected: true,
-                  lastSeen: txNow,
-                  disconnectedAt: null,
-                })
-              : p
-          );
-          const nextStateVersion = (roomData.stateVersion || 1) + 1;
-          const updatedPositions = buildPlayerPositionsMap(updatedPlayers, txNow);
-          const nextPresenceEntry: PlayerPresenceEntry = {
-            isConnected: true,
-            lastSeen: txNow,
-            disconnectedAt: null,
-          };
-
-          const updates: Record<string, any> = {
-            players: updatedPlayers,
-            playerCount: updatedPlayers.length,
-            maxPlayers,
-            status: expectedStatus,
-            playerPositions: updatedPositions,
-            [`presence.${effectiveUid}`]: nextPresenceEntry,
-            stateVersion: nextStateVersion,
-            updatedAt: new Date(txNow).toISOString(),
-            serverUpdatedAt: serverTimestamp(),
-          };
-
-          let nextSummary = roomData.lastMoveSummary;
-          let nextDiscId = roomData.disconnectedPlayerId;
-          let nextDiscName = roomData.disconnectedPlayerName;
-          let nextReconDeadline = roomData.reconnectionDeadline;
-
-          if (roomData.disconnectedPlayerId === effectiveUid) {
-            nextDiscId = null;
-            nextDiscName = null;
-            nextReconDeadline = null;
-            nextSummary = `ကစားသမား ${existingPlayer.displayName} ပြန်လည်ချိတ်ဆက်မိပါပြီ။`.slice(
-              0,
-              500
-            );
-            updates.disconnectedPlayerId = null;
-            updates.disconnectedPlayerName = null;
-            updates.reconnectionDeadline = null;
-            updates.lastMoveSummary = nextSummary;
-          }
-
-          transaction.update(roomRef, updates);
-
-          const committedRoom: GameRoom = {
-            ...roomData,
-            maxPlayers,
-            playerCount: updatedPlayers.length,
-            status: expectedStatus,
-            players: updatedPlayers,
-            playerPositions: updatedPositions,
-            presence: {
-              ...(roomData.presence || {}),
-              [effectiveUid]: nextPresenceEntry,
-            },
-            disconnectedPlayerId: nextDiscId,
-            disconnectedPlayerName: nextDiscName,
-            reconnectionDeadline: nextReconDeadline,
-            lastMoveSummary: nextSummary,
-            stateVersion: nextStateVersion,
-            updatedAt: new Date(txNow).toISOString(),
-          };
-
-          return {
-            roomId,
-            room: committedRoom,
-            alreadyJoined: true,
-          };
+        if (mutation.kind === 'noop') {
+          return mutation.result;
         }
-
-        // 4. Validate room status for NEW players
-        if (roomData.status === 'finished') {
-          throw new RoomJoinError('GAME_FINISHED', 'ဤဂိမ်းပွဲသည် ပြီးဆုံးသွားပါပြီ။');
-        }
-
-        if (roomData.status === 'playing') {
-          throw new RoomJoinError(
-            'GAME_PLAYING',
-            'ဂိမ်းစတင်နေပြီဖြစ်သောကြောင့် အခန်းသစ်သို့ ဝင်ရောက်၍ မရနိုင်ပါ။'
-          );
-        }
-
-        // 5. Validate capacity strictly against unique active players in the room
-        // (Never rely on stale client list or mismatched playerCount field)
-        if (uniquePlayers.length >= maxPlayers) {
-          throw new RoomJoinError(
-            'ROOM_FULL',
-            `အခန်းလူပြည့်နေပါသည် (အများဆုံး ${maxPlayers} ဦး ပြည့်နေပါပြီ)။`
-          );
-        }
-
-        // 6. Assign unique token color & atomically add new player
-        const usedColors = uniquePlayers.map((p) => p.color);
-        const availableColor =
-          GAME_CONFIG.PLAYER_COLORS.find((c) => !usedColors.includes(c.hex))?.hex ||
-          GAME_CONFIG.PLAYER_COLORS[uniquePlayers.length % GAME_CONFIG.PLAYER_COLORS.length].hex;
-
-        const newPlayer = sanitizePlayer(
-          {
-            uid: effectiveUid,
-            playerId: user.playerId,
-            displayName: user.displayName,
-            photoURL: user.photoURL,
-            isReady: false,
-            color: availableColor,
-            position: 1,
-            positionVersion: 1,
-            lastMoveId: null,
-            updatedAtMs: txNow,
-            activeTokenSkin: user.activeTokenSkin || 'token_crown',
-            isConnected: true,
-            lastSeen: txNow,
-            disconnectedAt: null,
-          },
-          txNow
-        );
-
-        const preservedExistingPlayers =
-          !hadDuplicateEntries && Array.isArray(roomData.players)
-            ? roomData.players.map((p) => sanitizePlayer(p, txNow))
-            : uniquePlayers;
-        const updatedPlayers = [...preservedExistingPlayers, newPlayer];
-        const newPlayerCount = updatedPlayers.length;
-        const nextStatus = computeLobbyStatus(newPlayerCount, maxPlayers);
-        const nextStateVersion = (roomData.stateVersion || 1) + 1;
-        const updatedPositions = buildPlayerPositionsMap(updatedPlayers, txNow);
-        const nextSummary = `${newPlayer.displayName} အခန်းသို့ ဝင်ရောက်လာခဲ့သည်။`.slice(0, 500);
-        const nextPresenceEntry: PlayerPresenceEntry = {
-          isConnected: true,
-          lastSeen: txNow,
-          disconnectedAt: null,
-        };
 
         transaction.update(roomRef, {
-          players: updatedPlayers,
-          playerCount: newPlayerCount,
-          maxPlayers,
-          status: nextStatus,
-          winnerId: null,
-          winnerName: null,
-          playerPositions: updatedPositions,
-          [`presence.${effectiveUid}`]: nextPresenceEntry,
-          stateVersion: nextStateVersion,
-          lastMoveSummary: nextSummary,
-          updatedAt: new Date(txNow).toISOString(),
+          ...mutation.updates,
           serverUpdatedAt: serverTimestamp(),
         });
 
-        const committedRoom: GameRoom = {
-          ...roomData,
-          maxPlayers,
-          playerCount: newPlayerCount,
-          status: nextStatus,
-          players: updatedPlayers,
-          playerPositions: updatedPositions,
-          presence: {
-            ...(roomData.presence || {}),
-            [effectiveUid]: nextPresenceEntry,
-          },
-          stateVersion: nextStateVersion,
-          lastMoveSummary: nextSummary,
-          updatedAt: new Date(txNow).toISOString(),
-        };
-
-        return {
-          roomId,
-          room: committedRoom,
-          alreadyJoined: false,
-        };
+        return mutation.result;
       });
     } catch (error) {
       throw classifyJoinError(error, `rooms/${roomId}`);

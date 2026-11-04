@@ -306,47 +306,6 @@ service cloud.firestore {
         (sz < 4 || isValidRoomPlayer(players[3]));
     }
 
-    function isValidExistingPlayerDelta(oldP, p, pAllowed) {
-      let lmid = p.get('lastMoveId', null);
-      let dAt = p.get('disconnectedAt', null);
-      let rk = p.get('rank', 1);
-      return p is map &&
-        p.uid == oldP.uid &&
-        p.diff(oldP).affectedKeys().hasOnly(pAllowed) &&
-        p.isReady is bool &&
-        p.position >= 1 && p.position <= 100 &&
-        p.get('positionVersion', 1) >= 1 &&
-        (lmid == null || (lmid is string && lmid.size() <= 80)) &&
-        p.get('updatedAtMs', 0) >= 0 &&
-        p.get('isConnected', true) is bool &&
-        p.get('lastSeen', 0) >= 0 &&
-        rk >= 1 && rk <= 4 &&
-        (dAt == null || dAt >= 0);
-    }
-
-    function isValidUpdatedPlayerSlot(oldPlayers, oldSz, p, idx, pAllowed) {
-      return (p in oldPlayers) ||
-        (oldSz > idx && oldPlayers[idx].uid == p.uid && isValidExistingPlayerDelta(oldPlayers[idx], p, pAllowed)) ||
-        isValidRoomPlayer(p);
-    }
-
-    function areUpdatedRoomPlayersValid(oldPlayers, newPlayers) {
-      let newSz = newPlayers.size();
-      let oldSz = oldPlayers.size();
-      let pAllowed = [
-        'isReady', 'position', 'positionVersion', 'lastMoveId',
-        'updatedAtMs', 'isConnected', 'lastSeen', 'rank', 'disconnectedAt'
-      ];
-      return newPlayers is list && newSz >= 1 && newSz <= 4 && (
-        newPlayers == oldPlayers || (
-          isValidUpdatedPlayerSlot(oldPlayers, oldSz, newPlayers[0], 0, pAllowed) &&
-          (newSz < 2 || isValidUpdatedPlayerSlot(oldPlayers, oldSz, newPlayers[1], 1, pAllowed)) &&
-          (newSz < 3 || isValidUpdatedPlayerSlot(oldPlayers, oldSz, newPlayers[2], 2, pAllowed)) &&
-          (newSz < 4 || isValidUpdatedPlayerSlot(oldPlayers, oldSz, newPlayers[3], 3, pAllowed))
-        )
-      );
-    }
-
     function hasUniquePlayerUids(players) {
       let sz = players.size();
       return (sz < 2 || players[0].uid != players[1].uid) &&
@@ -364,22 +323,57 @@ service cloud.firestore {
       );
     }
 
-    function samePlayerRosterUids(oldPlayers, newPlayers) {
-      let sz = oldPlayers.size();
-      return sz == newPlayers.size() &&
-        (sz < 1 || oldPlayers[0].uid == newPlayers[0].uid) &&
-        (sz < 2 || oldPlayers[1].uid == newPlayers[1].uid) &&
-        (sz < 3 || oldPlayers[2].uid == newPlayers[2].uid) &&
-        (sz < 4 || oldPlayers[3].uid == newPlayers[3].uid);
+    function isUnchangedOrSanitizedSlot(oldSlot, newSlot) {
+      return oldSlot == newSlot || (
+        newSlot is map &&
+        oldSlot.uid == newSlot.uid &&
+        oldSlot.displayName == newSlot.displayName &&
+        oldSlot.isReady == newSlot.isReady &&
+        oldSlot.position == newSlot.position &&
+        newSlot.diff(oldSlot).affectedKeys().hasOnly([
+          'updatedAtMs', 'lastSeen', 'isConnected', 'disconnectedAt', 'positionVersion', 'lastMoveId'
+        ])
+      );
     }
 
-    function samePlayerPositions(oldPlayers, newPlayers) {
+    function isValidJoinRoster(oldPlayers, newPlayers, joinUid) {
+      let oldSz = oldPlayers.size();
+      let joined = newPlayers[oldSz];
+      return (oldSz < 1 || isUnchangedOrSanitizedSlot(oldPlayers[0], newPlayers[0])) &&
+        (oldSz < 2 || isUnchangedOrSanitizedSlot(oldPlayers[1], newPlayers[1])) &&
+        (oldSz < 3 || isUnchangedOrSanitizedSlot(oldPlayers[2], newPlayers[2])) &&
+        isValidRoomPlayer(joined) &&
+        joined.uid == joinUid &&
+        joined.isReady == false &&
+        joined.position == 1;
+    }
+
+    function isValidCallerReadySlot(oldSlot, newSlot, callerUid) {
+      let dAt = newSlot.get('disconnectedAt', null);
+      return oldSlot.uid != callerUid
+        ? isUnchangedOrSanitizedSlot(oldSlot, newSlot)
+        : (
+          newSlot is map &&
+          newSlot.uid == callerUid &&
+          newSlot.position == oldSlot.position &&
+          newSlot.isReady is bool &&
+          newSlot.get('isConnected', true) is bool &&
+          newSlot.get('updatedAtMs', 0) >= 0 &&
+          newSlot.get('lastSeen', 0) >= 0 &&
+          (dAt == null || (dAt is number && dAt >= 0)) &&
+          newSlot.diff(oldSlot).affectedKeys().hasOnly([
+            'isReady', 'updatedAtMs', 'isConnected', 'lastSeen', 'disconnectedAt', 'positionVersion', 'lastMoveId'
+          ])
+        );
+    }
+
+    function isValidReadyToggleRoster(oldPlayers, newPlayers, callerUid) {
       let sz = oldPlayers.size();
-      return sz == newPlayers.size() &&
-        (sz < 1 || oldPlayers[0].position == newPlayers[0].position) &&
-        (sz < 2 || oldPlayers[1].position == newPlayers[1].position) &&
-        (sz < 3 || oldPlayers[2].position == newPlayers[2].position) &&
-        (sz < 4 || oldPlayers[3].position == newPlayers[3].position);
+      return newPlayers is list && sz == newPlayers.size() && sz >= 1 && sz <= 4 &&
+        isValidCallerReadySlot(oldPlayers[0], newPlayers[0], callerUid) &&
+        (sz < 2 || isValidCallerReadySlot(oldPlayers[1], newPlayers[1], callerUid)) &&
+        (sz < 3 || isValidCallerReadySlot(oldPlayers[2], newPlayers[2], callerUid)) &&
+        (sz < 4 || isValidCallerReadySlot(oldPlayers[3], newPlayers[3], callerUid));
     }
 
     function samePlayersReady(oldPlayers, newPlayers) {
@@ -391,21 +385,6 @@ service cloud.firestore {
         (sz < 4 || oldPlayers[3].isReady == newPlayers[3].isReady);
     }
 
-    function isValidReadySlot(oldP, newP, callerUid) {
-      return oldP.uid == newP.uid &&
-        oldP.position == newP.position &&
-        (oldP.uid == callerUid || oldP.isReady == newP.isReady);
-    }
-
-    function isValidReadyToggleRoster(oldPlayers, newPlayers, callerUid) {
-      let sz = oldPlayers.size();
-      return sz == newPlayers.size() &&
-        (sz < 1 || isValidReadySlot(oldPlayers[0], newPlayers[0], callerUid)) &&
-        (sz < 2 || isValidReadySlot(oldPlayers[1], newPlayers[1], callerUid)) &&
-        (sz < 3 || isValidReadySlot(oldPlayers[2], newPlayers[2], callerUid)) &&
-        (sz < 4 || isValidReadySlot(oldPlayers[3], newPlayers[3], callerUid));
-    }
-
     function areAllNonHostPlayersReady(players, hostId) {
       let sz = players.size();
       return (sz < 1 || players[0].uid == hostId || players[0].isReady == true) &&
@@ -414,36 +393,77 @@ service cloud.firestore {
         (sz < 4 || players[3].uid == hostId || players[3].isReady == true);
     }
 
-    function sameRosterAllAtStart(oldPlayers, newPlayers) {
-      let sz = oldPlayers.size();
-      return sz == newPlayers.size() &&
-        (sz < 1 || (oldPlayers[0].uid == newPlayers[0].uid && newPlayers[0].position == 1)) &&
-        (sz < 2 || (oldPlayers[1].uid == newPlayers[1].uid && newPlayers[1].position == 1)) &&
-        (sz < 3 || (oldPlayers[2].uid == newPlayers[2].uid && newPlayers[2].position == 1)) &&
-        (sz < 4 || (oldPlayers[3].uid == newPlayers[3].uid && newPlayers[3].position == 1));
+    function isValidResetSlot(oldSlot, newSlot, resetAllowed) {
+      return newSlot is map &&
+        oldSlot.uid == newSlot.uid &&
+        newSlot.position == 1 &&
+        newSlot.isReady is bool &&
+        newSlot.get('lastMoveId', null) == null &&
+        newSlot.get('positionVersion', 1) >= 1 &&
+        newSlot.get('updatedAtMs', 0) >= 0 &&
+        newSlot.get('isConnected', true) is bool &&
+        (!('rank' in newSlot) || (newSlot.rank >= 1 && newSlot.rank <= 4)) &&
+        newSlot.diff(oldSlot).affectedKeys().hasOnly(resetAllowed);
     }
 
-    function preserveExistingPlayersOnJoin(oldPlayers, newPlayers, joinUid) {
-      let oldSz = oldPlayers.size();
-      let newSz = newPlayers.size();
-      let joined = newPlayers[newSz - 1];
-      return newSz == oldSz + 1 &&
-        (oldSz < 1 || (oldPlayers[0].uid == newPlayers[0].uid && oldPlayers[0].isReady == newPlayers[0].isReady && oldPlayers[0].position == newPlayers[0].position)) &&
-        (oldSz < 2 || (oldPlayers[1].uid == newPlayers[1].uid && oldPlayers[1].isReady == newPlayers[1].isReady && oldPlayers[1].position == newPlayers[1].position)) &&
-        (oldSz < 3 || (oldPlayers[2].uid == newPlayers[2].uid && oldPlayers[2].isReady == newPlayers[2].isReady && oldPlayers[2].position == newPlayers[2].position)) &&
-        joined.uid == joinUid &&
-        joined.isReady == false &&
-        joined.position == 1;
+    function sameRosterAllAtStart(oldPlayers, newPlayers) {
+      let sz = oldPlayers.size();
+      let resetAllowed = [
+        'isReady', 'position', 'positionVersion', 'lastMoveId',
+        'updatedAtMs', 'isConnected', 'lastSeen', 'rank', 'disconnectedAt'
+      ];
+      return sz == newPlayers.size() && sz >= 1 && sz <= 4 &&
+        isValidResetSlot(oldPlayers[0], newPlayers[0], resetAllowed) &&
+        (sz < 2 || isValidResetSlot(oldPlayers[1], newPlayers[1], resetAllowed)) &&
+        (sz < 3 || isValidResetSlot(oldPlayers[2], newPlayers[2], resetAllowed)) &&
+        (sz < 4 || isValidResetSlot(oldPlayers[3], newPlayers[3], resetAllowed));
+    }
+
+    function isValidTurnMoverSlot(oldSlot, newSlot) {
+      let lmid = newSlot.get('lastMoveId', null);
+      let rk = newSlot.get('rank', 1);
+      return newSlot is map &&
+        oldSlot.uid == newSlot.uid &&
+        newSlot.isReady == oldSlot.isReady &&
+        newSlot.get('positionVersion', 1) >= 1 &&
+        (lmid == null || (lmid is string && lmid.size() <= 80)) &&
+        newSlot.get('updatedAtMs', 0) >= 0 &&
+        rk >= 1 && rk <= 4 &&
+        newSlot.diff(oldSlot).affectedKeys().hasOnly([
+          'position', 'positionVersion', 'lastMoveId', 'updatedAtMs',
+          'rank', 'isConnected', 'lastSeen', 'disconnectedAt'
+        ]);
+    }
+
+    function isValidSnakesTurnRoster(oldPlayers, newPlayers, turnIdx) {
+      let sz = oldPlayers.size();
+      return newPlayers is list && sz == newPlayers.size() && sz >= 2 && sz <= 4 &&
+        (turnIdx == 0 ? isValidTurnMoverSlot(oldPlayers[0], newPlayers[0]) : isUnchangedOrSanitizedSlot(oldPlayers[0], newPlayers[0])) &&
+        (turnIdx == 1 ? isValidTurnMoverSlot(oldPlayers[1], newPlayers[1]) : isUnchangedOrSanitizedSlot(oldPlayers[1], newPlayers[1])) &&
+        (sz < 3 || (turnIdx == 2 ? isValidTurnMoverSlot(oldPlayers[2], newPlayers[2]) : isUnchangedOrSanitizedSlot(oldPlayers[2], newPlayers[2]))) &&
+        (sz < 4 || (turnIdx == 3 ? isValidTurnMoverSlot(oldPlayers[3], newPlayers[3]) : isUnchangedOrSanitizedSlot(oldPlayers[3], newPlayers[3])));
+    }
+
+    function isPreservedRemainingSlot(remP, oldSlot) {
+      return remP == oldSlot || (
+        remP is map &&
+        remP.uid == oldSlot.uid &&
+        remP.displayName == oldSlot.displayName &&
+        remP.position == oldSlot.position &&
+        remP.isReady is bool &&
+        (!('rank' in remP) || (remP.rank is number && remP.rank >= 1 && remP.rank <= 4)) &&
+        remP.diff(oldSlot).affectedKeys().hasOnly([
+          'isReady', 'rank', 'updatedAtMs', 'lastSeen', 'isConnected', 'disconnectedAt', 'positionVersion', 'lastMoveId'
+        ])
+      );
     }
 
     function playerMatchesPositionInExisting(p, oldPlayers) {
-      let pUid = p.uid;
-      let pPos = p.position;
       let sz = oldPlayers.size();
-      return (sz >= 1 && oldPlayers[0].uid == pUid && oldPlayers[0].position == pPos) ||
-        (sz >= 2 && oldPlayers[1].uid == pUid && oldPlayers[1].position == pPos) ||
-        (sz >= 3 && oldPlayers[2].uid == pUid && oldPlayers[2].position == pPos) ||
-        (sz >= 4 && oldPlayers[3].uid == pUid && oldPlayers[3].position == pPos);
+      return (sz >= 1 && isPreservedRemainingSlot(p, oldPlayers[0])) ||
+        (sz >= 2 && isPreservedRemainingSlot(p, oldPlayers[1])) ||
+        (sz >= 3 && isPreservedRemainingSlot(p, oldPlayers[2])) ||
+        (sz >= 4 && isPreservedRemainingSlot(p, oldPlayers[3]));
     }
 
     function allRemainingPreservePositions(remPlayers, oldPlayers) {
@@ -475,15 +495,6 @@ service cloud.firestore {
         idx >= 0 &&
         idx < roomData.players.size() &&
         roomData.players[int(idx)].uid == uid;
-    }
-
-    function nonTurnPlayerPositionsUnchanged(oldPlayers, newPlayers, turnIdx) {
-      let sz = oldPlayers.size();
-      return sz == newPlayers.size() &&
-        (sz < 1 || turnIdx == 0 || oldPlayers[0].position == newPlayers[0].position) &&
-        (sz < 2 || turnIdx == 1 || oldPlayers[1].position == newPlayers[1].position) &&
-        (sz < 3 || turnIdx == 2 || oldPlayers[2].position == newPlayers[2].position) &&
-        (sz < 4 || turnIdx == 3 || oldPlayers[3].position == newPlayers[3].position);
     }
 
     // Verified Snakes & Ladders single-turn reachability (Dice 1..6 + Ladders 4->14, 9->31, 20->38, 28->84, 40->59, 51->67, 63->81, 71->91)
@@ -546,7 +557,7 @@ service cloud.firestore {
         data.get('gameRound', 1) >= 1 &&
         (lmid == null || (lmid is string && lmid.size() <= 80)) &&
         (!('playerPositions' in data) || (data.playerPositions is map && data.playerPositions.size() <= 4)) &&
-        (!('presence' in data) || (data.presence is map && data.presence.size() <= 16)) &&
+        (!('presence' in data) || (data.presence is map && data.presence.size() <= 64)) &&
         data.get('turnStartTimestamp', 0) >= 0 &&
         data.get('turnDeadline', 0) >= 0 &&
         (rcd == null || (rcd is number && rcd >= 0)) &&
@@ -572,38 +583,19 @@ service cloud.firestore {
         );
     }
 
-    function isValidUpdatedRoomCore(d, pSize) {
+    function isValidCommonUpdatedMeta(d, pSize) {
       let wid = d.get('winnerId', null);
       let wnm = d.get('winnerName', null);
-      let lmid = d.get('lastMoveId', null);
-      let rcd = d.get('reconnectionDeadline', null);
-      let dpid = d.get('disconnectedPlayerId', null);
-      let dpnm = d.get('disconnectedPlayerName', null);
-      let lmp = d.get('lastMovingPlayerUid', null);
       return d.status in ['waiting', 'full', 'playing', 'finished'] &&
+        pSize >= 1 &&
         pSize <= d.maxPlayers &&
         d.get('playerCount', pSize) == pSize &&
-        d.get('currentTurnIndex', 0) >= 0 && d.get('currentTurnIndex', 0) < 4 &&
-        d.get('lastDiceRoll', 1) >= 1 && d.get('lastDiceRoll', 1) <= 6 &&
-        d.get('stateVersion', 1) >= 1 &&
-        d.get('gameRound', 1) >= 1 &&
-        d.get('turnStartTimestamp', 0) >= 0 &&
-        d.get('turnDeadline', 0) >= 0 &&
-        d.get('lastMoveTimestamp', 0) >= 0 &&
-        (d.get('hostName', '') + '').size() <= 60 &&
         (d.get('lastMoveSummary', '') + '').size() <= 500 &&
         (d.get('updatedAt', '') + '').size() <= 40 &&
-        (lmid == null || (lmid is string && lmid.size() <= 80)) &&
-        (rcd == null || rcd >= 0) &&
-        (dpid == null || (dpid is string && dpid.size() <= 128)) &&
-        (dpnm == null || (dpnm is string && dpnm.size() <= 60)) &&
         (wid == null || (wid is string && wid.size() >= 1 && wid.size() <= 128)) &&
         (wnm == null || (wnm is string && wnm.size() <= 60)) &&
-        (lmp == null || (lmp is string && lmp.size() <= 128)) &&
-        (!('matchParticipantIds' in d) || (d.matchParticipantIds is list && d.matchParticipantIds.size() <= 4)) &&
         (!('playerPositions' in d) || (d.playerPositions is map && d.playerPositions.size() <= 4)) &&
-        (!('presence' in d) || (d.presence is map && d.presence.size() <= 16)) &&
-        (!('lastMovePath' in d) || (d.lastMovePath is list && d.lastMovePath.size() <= 20)) &&
+        (!('presence' in d) || (d.presence is map && d.presence.size() <= 64)) &&
         (!('serverUpdatedAt' in d) || d.serverUpdatedAt is timestamp) &&
         (
           d.gameType != 'snow_rush' || (
@@ -670,13 +662,20 @@ service cloud.firestore {
       let turnIdx = int(ext.currentTurnIndex);
       let oldPos = oldP[turnIdx].position;
       let newPos = newP[turnIdx].position;
+      let lmid = inc.get('lastMoveId', null);
       return ext.get('winnerId', null) == null &&
         isCurrentTurnPlayer(ext, uid) &&
-        samePlayerRosterUids(oldP, newP) &&
-        nonTurnPlayerPositionsUnchanged(oldP, newP, turnIdx) &&
+        isValidSnakesTurnRoster(oldP, newP, turnIdx) &&
         isValidSnakesTurnPositionStep(oldPos, newPos) &&
         inc.lastDiceRoll is number && inc.lastDiceRoll >= 1 && inc.lastDiceRoll <= 6 &&
         inc.lastMovingPlayerUid == uid &&
+        inc.currentTurnIndex is number && inc.currentTurnIndex >= 0 && inc.currentTurnIndex < newP.size() &&
+        inc.get('turnStartTimestamp', 0) >= 0 &&
+        inc.get('turnDeadline', 0) >= 0 &&
+        inc.get('lastMoveTimestamp', 0) >= 0 &&
+        (lmid == null || (lmid is string && lmid.size() <= 80)) &&
+        (!('lastMovePath' in inc) || (inc.lastMovePath is list && inc.lastMovePath.size() <= 20)) &&
+        (!('matchParticipantIds' in inc) || (inc.matchParticipantIds is list && inc.matchParticipantIds.size() <= 4)) &&
         inc.hostId == ext.hostId &&
         existingGameRound(inc) == existingGameRound(ext) &&
         (
@@ -717,43 +716,52 @@ service cloud.firestore {
             changed.hasOnly(['presence']) &&
             isMember &&
             inc.presence is map &&
-            inc.presence.size() <= 16 &&
+            inc.presence.size() <= 64 &&
             (
               !('presence' in ext) ||
               !(ext.presence is map) ||
               inc.presence.diff(ext.presence).affectedKeys().hasOnly([uid])
             )
           ) || (
-            inc.keys().hasAll(['id', 'roomCode', 'gameType', 'hostId', 'status', 'maxPlayers', 'players']) &&
+            newP is list &&
             hostVal is string && hostVal.size() >= 1 && hostVal.size() <= 128 &&
-            areUpdatedRoomPlayersValid(oldP, newP) &&
-            isValidUpdatedRoomCore(inc, newP.size()) && (
-              // Action 2: New Player Join Waiting Room (Appends Self Only)
+            isValidCommonUpdatedMeta(inc, newP.size()) && (
+              // Action 2: New Player Join Waiting Room (Appends Self Only; Strictly 'waiting' Rooms With Open Slot)
               (
                 !isMember &&
-                ext.status in ['waiting', 'full'] &&
+                ext.status == 'waiting' &&
                 oldP.size() >= 1 &&
                 oldP.size() < ext.maxPlayers &&
+                newP.size() == oldP.size() + 1 &&
                 changed.hasOnly([
                   'players', 'playerCount', 'maxPlayers', 'status',
                   'winnerId', 'winnerName', 'playerPositions', 'presence',
                   'stateVersion', 'lastMoveSummary', 'updatedAt', 'serverUpdatedAt'
                 ]) &&
-                preserveExistingPlayersOnJoin(oldP, newP, uid) &&
                 hostVal == ext.hostId &&
                 existingGameRound(inc) == existingGameRound(ext) &&
+                isValidJoinRoster(oldP, newP, uid) &&
                 inc.get('winnerId', null) == null &&
                 inc.get('winnerName', null) == null &&
                 inc.status == (newP.size() >= inc.maxPlayers ? 'full' : 'waiting') &&
+                (
+                  !('presence' in inc) ||
+                  !('presence' in ext) ||
+                  !(ext.presence is map) ||
+                  inc.presence.diff(ext.presence).affectedKeys().hasOnly([uid])
+                ) &&
                 hasMonotonicStateVersion(ext, inc)
               ) ||
               // Action 3: Existing Member Lobby Ready Toggle / Reconnect Sync
               (
                 isMember &&
+                !('gameRound' in changed) &&
+                !('lastDiceRoll' in changed) &&
+                !('lastMoveId' in changed) &&
+                !('currentTurnIndex' in changed) &&
+                (inc.status != 'playing' || ext.status == 'playing') &&
                 newP.size() == oldP.size() &&
-                !changed.hasAny(['gameRound', 'lastDiceRoll', 'lastMoveId', 'lastMovingPlayerUid', 'currentTurnIndex', 'turnStartTimestamp', 'turnDeadline']) &&
                 ext.status in ['waiting', 'full', 'playing'] &&
-                existingGameRound(inc) == existingGameRound(ext) &&
                 changed.hasOnly([
                   'players', 'playerCount', 'maxPlayers', 'status',
                   'winnerId', 'winnerName', 'playerPositions', 'presence',
@@ -762,19 +770,22 @@ service cloud.firestore {
                 ]) &&
                 isValidReadyToggleRoster(oldP, newP, uid) &&
                 hostVal == ext.hostId &&
+                existingGameRound(inc) == existingGameRound(ext) &&
                 sameWinnerId(ext, inc) &&
                 inc.status == (ext.status == 'playing' ? 'playing' : (newP.size() >= inc.maxPlayers ? 'full' : 'waiting')) &&
                 (
-                  !changed.hasAny(['disconnectedPlayerId']) ||
+                  !('disconnectedPlayerId' in changed) ||
                   (('disconnectedPlayerId' in ext) && ext.disconnectedPlayerId == uid && inc.disconnectedPlayerId == null && inc.reconnectionDeadline == null)
                 ) &&
                 hasMonotonicStateVersion(ext, inc)
               ) ||
               // Action 4: Host Start Game (waiting | full -> playing; requires >= 2 players & non-host ready)
               (
-                ext.status in ['waiting', 'full'] &&
                 inc.status == 'playing' &&
+                ext.status in ['waiting', 'full'] &&
                 ext.hostId == uid &&
+                oldP.size() >= 2 &&
+                oldP.size() <= ext.maxPlayers &&
                 changed.hasOnly([
                   'status', 'players', 'playerCount', 'playerPositions',
                   'currentTurnIndex', 'turnStartTimestamp', 'turnDeadline',
@@ -784,10 +795,18 @@ service cloud.firestore {
                   'gameRound', 'stateVersion', 'lastMoveSummary', 'updatedAt', 'serverUpdatedAt'
                 ]) &&
                 hostVal == ext.hostId &&
-                oldP.size() >= 2 &&
-                oldP.size() <= ext.maxPlayers &&
                 areAllNonHostPlayersReady(oldP, ext.hostId) &&
                 sameRosterAllAtStart(oldP, newP) &&
+                inc.currentTurnIndex == 0 &&
+                inc.get('turnStartTimestamp', 0) >= 0 &&
+                inc.get('turnDeadline', 0) >= 0 &&
+                inc.get('reconnectionDeadline', null) == null &&
+                inc.get('disconnectedPlayerId', null) == null &&
+                inc.get('disconnectedPlayerName', null) == null &&
+                inc.get('lastMoveId', null) == null &&
+                inc.get('lastMovingPlayerUid', null) == null &&
+                (!('lastMovePath' in inc) || (inc.lastMovePath is list && inc.lastMovePath.size() <= 20)) &&
+                (!('matchParticipantIds' in inc) || (inc.matchParticipantIds is list && inc.matchParticipantIds.size() <= 4)) &&
                 inc.get('winnerId', null) == null &&
                 inc.get('winnerName', null) == null &&
                 ('gameRound' in inc) && inc.gameRound is number &&
@@ -798,7 +817,7 @@ service cloud.firestore {
               (
                 ext.gameType == 'snakes_and_ladders' &&
                 ext.status == 'playing' &&
-                changed.hasAny(['lastDiceRoll', 'lastMoveId', 'lastMovingPlayerUid']) &&
+                ('lastDiceRoll' in changed || 'lastMoveId' in changed || 'lastMovingPlayerUid' in changed) &&
                 changed.hasOnly([
                   'players', 'playerPositions', 'presence',
                   'lastDiceRoll', 'lastMoveSummary', 'lastMoveId', 'lastMoveTimestamp',
@@ -822,14 +841,17 @@ service cloud.firestore {
                   'currentTurnIndex', 'turnStartTimestamp', 'turnDeadline',
                   'stateVersion', 'lastMoveSummary', 'updatedAt', 'serverUpdatedAt'
                 ]) &&
-                samePlayerRosterUids(oldP, newP) &&
-                samePlayerPositions(oldP, newP) &&
-                samePlayersReady(oldP, newP) &&
+                (oldP == newP || (isValidReadyToggleRoster(oldP, newP, uid) && samePlayersReady(oldP, newP))) &&
+                inc.get('currentTurnIndex', 0) >= 0 && inc.get('currentTurnIndex', 0) < newP.size() &&
+                inc.get('turnStartTimestamp', 0) >= 0 &&
+                inc.get('turnDeadline', 0) >= 0 &&
+                (inc.get('reconnectionDeadline', null) == null || inc.reconnectionDeadline >= 0) &&
+                (inc.get('disconnectedPlayerName', null) == null || (inc.disconnectedPlayerName is string && inc.disconnectedPlayerName.size() <= 60)) &&
                 hostVal == ext.hostId &&
                 existingGameRound(inc) == existingGameRound(ext) &&
                 sameWinnerId(ext, inc) &&
                 (
-                  !changed.hasAny(['disconnectedPlayerId']) ||
+                  !('disconnectedPlayerId' in changed) ||
                   inc.disconnectedPlayerId == uid ||
                   inc.disconnectedPlayerId == null
                 ) &&
@@ -852,6 +874,11 @@ service cloud.firestore {
                 hasUniquePlayerUids(newP) &&
                 isPlayerInList(newP, hostVal) &&
                 allRemainingPreservePositions(newP, oldP) &&
+                (inc.get('hostName', '') + '').size() <= 60 &&
+                inc.get('currentTurnIndex', 0) >= 0 && inc.get('currentTurnIndex', 0) < 4 &&
+                inc.get('turnStartTimestamp', 0) >= 0 &&
+                inc.get('turnDeadline', 0) >= 0 &&
+                (!('matchParticipantIds' in inc) || (inc.matchParticipantIds is list && inc.matchParticipantIds.size() <= 4)) &&
                 (
                   ext.hostId == uid
                     ? hostVal == newP[0].uid
@@ -889,6 +916,18 @@ service cloud.firestore {
                 ]) &&
                 hostVal == ext.hostId &&
                 sameRosterAllAtStart(oldP, newP) &&
+                inc.currentTurnIndex == 0 &&
+                inc.lastDiceRoll == 1 &&
+                inc.get('turnStartTimestamp', 0) == 0 &&
+                inc.get('turnDeadline', 0) == 0 &&
+                inc.get('lastMoveTimestamp', 0) >= 0 &&
+                inc.get('reconnectionDeadline', null) == null &&
+                inc.get('disconnectedPlayerId', null) == null &&
+                inc.get('disconnectedPlayerName', null) == null &&
+                inc.get('lastMoveId', null) == null &&
+                inc.get('lastMovingPlayerUid', null) == null &&
+                (!('lastMovePath' in inc) || (inc.lastMovePath is list && inc.lastMovePath.size() <= 20)) &&
+                (!('matchParticipantIds' in inc) || (inc.matchParticipantIds is list && inc.matchParticipantIds.size() <= 4)) &&
                 inc.status == (newP.size() >= inc.maxPlayers ? 'full' : 'waiting') &&
                 inc.get('winnerId', null) == null &&
                 inc.get('winnerName', null) == null &&

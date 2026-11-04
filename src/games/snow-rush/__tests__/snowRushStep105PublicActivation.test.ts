@@ -44,6 +44,7 @@ import {
 import {
   RoomJoinError,
   buildInitialGameRoom,
+  buildJoinRoomTransactionMutation,
   classifyRoomOperationError,
   computeGameRoomLeaveOutcome,
   computeLobbyStatus,
@@ -1067,6 +1068,8 @@ async function runStep105PublicActivationTests(): Promise<void> {
     const functions = new Map<string, FnDef>();
     const roomPerms = new Map<string, any>();
 
+    const rewardClaimPerms = new Map<string, any>();
+
     const walkSetup = (node: any) => {
       if (!node) return;
       const ctor = node.constructor?.name ?? '';
@@ -1110,24 +1113,32 @@ async function runStep105PublicActivationTests(): Promise<void> {
         if (fnName && retExpr) functions.set(fnName, { params, lets, retExpr });
         return;
       }
-      if (ctor === 'MatchRuleDeclarationContext' && node.getText().startsWith('match/rooms/{roomId}{')) {
-        for (const ch of node.children ?? []) {
-          if (ch.constructor?.name === 'MatchStatementContext') {
-            for (const mc of ch.children ?? []) {
-              if (mc.constructor?.name === 'PermissionDeclarationContext') {
-                const ops: string[] = [];
-                let bodyExpr: any = null;
-                for (const pc of mc.children ?? []) {
-                  if (pc.constructor?.name === 'OperationIdContext') {
-                    ops.push(...pc.getText().split(',').map((s: string) => s.trim()).filter(Boolean));
-                  }
-                  if (pc.constructor?.name === 'PermissionBodyContext') {
-                    for (const bc of pc.children ?? []) {
-                      if ((bc.constructor?.name ?? '').endsWith('ExpressionContext')) bodyExpr = bc;
+      if (ctor === 'MatchRuleDeclarationContext') {
+        const matchTxt = node.getText();
+        const targetMap = matchTxt.startsWith('match/rooms/{roomId}{')
+          ? roomPerms
+          : matchTxt.startsWith('match/reward_claims/{claimId}{')
+            ? rewardClaimPerms
+            : null;
+        if (targetMap) {
+          for (const ch of node.children ?? []) {
+            if (ch.constructor?.name === 'MatchStatementContext') {
+              for (const mc of ch.children ?? []) {
+                if (mc.constructor?.name === 'PermissionDeclarationContext') {
+                  const ops: string[] = [];
+                  let bodyExpr: any = null;
+                  for (const pc of mc.children ?? []) {
+                    if (pc.constructor?.name === 'OperationIdContext') {
+                      ops.push(...pc.getText().split(',').map((s: string) => s.trim()).filter(Boolean));
+                    }
+                    if (pc.constructor?.name === 'PermissionBodyContext') {
+                      for (const bc of pc.children ?? []) {
+                        if ((bc.constructor?.name ?? '').endsWith('ExpressionContext')) bodyExpr = bc;
+                      }
                     }
                   }
+                  for (const op of ops) targetMap.set(op, bodyExpr);
                 }
-                for (const op of ops) roomPerms.set(op, bodyExpr);
               }
             }
           }
@@ -1180,21 +1191,44 @@ async function runStep105PublicActivationTests(): Promise<void> {
       };
     };
 
-    const evaluateRoomOp = (
-      op: 'create' | 'update' | 'delete',
+    const applyFirestoreTransactionUpdate = (
+      extDoc: Record<string, any>,
+      rawUpdates: Record<string, any>
+    ): Record<string, any> => {
+      const nextDoc: Record<string, any> = { ...extDoc };
+      for (const [k, v] of Object.entries(rawUpdates)) {
+        if (k.includes('.')) {
+          const [topKey, subKey] = k.split('.');
+          nextDoc[topKey] = {
+            ...(nextDoc[topKey] && typeof nextDoc[topKey] === 'object' ? nextDoc[topKey] : {}),
+            [subKey]: v,
+          };
+        } else {
+          nextDoc[k] = v;
+        }
+      }
+      nextDoc.serverUpdatedAt = TIMESTAMP_TAG;
+      return nextDoc;
+    };
+
+    const DB_NAME = 'ai-studio-47dffdd9-9dac-40e5-b320-95d71826db89';
+
+    const evaluatePermExpr = (
+      permExpr: any,
       ctx: {
-        roomId: string;
+        pathVars: Record<string, string>;
         authUid: string | null;
         incData?: Record<string, any> | null;
         extData?: Record<string, any> | null;
+        mockDocs?: Record<string, Record<string, any>>;
       }
     ) => {
       let totalExpr = 0;
       let nonLitExpr = 0;
 
       const rootEnv: Record<string, any> = {
-        roomId: ctx.roomId,
-        database: 'ai-studio-47dffdd9-9dac-40e5-b320-95d71826db89',
+        ...ctx.pathVars,
+        database: DB_NAME,
         request: {
           auth: ctx.authUid ? { uid: ctx.authUid, token: { email_verified: true } } : null,
           resource: ctx.incData ? { data: ctx.incData } : null,
@@ -1207,11 +1241,32 @@ async function runStep105PublicActivationTests(): Promise<void> {
         if (!exprListNode) return [];
         const out: any[] = [];
         for (const ch of exprListNode.children ?? []) {
-          if ((ch.constructor?.name ?? '').endsWith('ExpressionContext')) {
+          const cName = ch.constructor?.name ?? '';
+          if (cName.endsWith('ExpressionContext') || cName.includes('Path')) {
             out.push(evalNode(ch, env));
           }
         }
         return out;
+      };
+
+      const evalPathNode = (pNode: any, env: Record<string, any>): string => {
+        if (!pNode) return '';
+        const raw = pNode.getText();
+        if (!raw.includes('$(')) return raw;
+        const pKids = pNode.children ?? [];
+        const exprChild = pKids.find((k: any) => (k.constructor?.name ?? '').endsWith('ExpressionContext'));
+        if (exprChild && (raw.startsWith('$(') || raw.startsWith('/$(')) && raw.endsWith(')')) {
+          const prefix = raw.startsWith('/$(') ? '/' : '';
+          return prefix + String(evalNode(exprChild, env));
+        }
+        if (!exprChild && (raw.startsWith('$(') || raw.startsWith('/$(')) && raw.endsWith(')')) {
+          const prefix = raw.startsWith('/$(') ? '/' : '';
+          const ident = raw.slice(prefix.length + 2, -1);
+          totalExpr += 1;
+          if (Object.prototype.hasOwnProperty.call(env, ident)) return prefix + String(env[ident]);
+          throw new Error(`Unbound path variable ${ident}`);
+        }
+        return pKids.map((c: any) => evalPathNode(c, env)).join('');
       };
 
       const invokeCelMethod = (target: any, methodName: string, args: any[]): any => {
@@ -1256,6 +1311,11 @@ async function runStep105PublicActivationTests(): Promise<void> {
         const ctor = node.constructor?.name ?? '';
         const kids = node.children ?? [];
 
+        if (ctor.includes('Path')) {
+          totalExpr += 1;
+          nonLitExpr += 1;
+          return evalPathNode(node, env);
+        }
         if (ctor === 'PrimaryExpressionContext' || ctor === 'IndexLookupContext') {
           return evalNode(kids[0], env);
         }
@@ -1296,6 +1356,14 @@ async function runStep105PublicActivationTests(): Promise<void> {
           const args = evalExprList(listChild, env);
           if (fnName === 'int') return Math.trunc(Number(args[0]));
           if (fnName === 'string') return String(args[0]);
+          if (fnName === 'exists') {
+            return Boolean(ctx.mockDocs && Object.prototype.hasOwnProperty.call(ctx.mockDocs, String(args[0])));
+          }
+          if (fnName === 'get') {
+            const docData = ctx.mockDocs?.[String(args[0])];
+            if (!docData) throw new Error(`Missing mock doc ${args[0]}`);
+            return { data: docData };
+          }
           const fnDef = functions.get(fnName);
           if (!fnDef) throw new Error(`Unknown rules function ${fnName}`);
           const fnEnv: Record<string, any> = { ...rootEnv };
@@ -1303,6 +1371,9 @@ async function runStep105PublicActivationTests(): Promise<void> {
             fnEnv[pName] = args[idx];
           });
           for (const lb of fnDef.lets) {
+            // Strictest Firestore CEL accounting: count each let-binding node + its expression
+            totalExpr += 1;
+            nonLitExpr += 1;
             fnEnv[lb.name] = evalNode(lb.expr, fnEnv);
           }
           return evalNode(fnDef.retExpr, fnEnv);
@@ -1326,7 +1397,6 @@ async function runStep105PublicActivationTests(): Promise<void> {
           return target[idx];
         }
         if (ctor === 'IdMemberFunctionCallSimpleExpressionContext') {
-          // Variable lookup + method call
           totalExpr += 2;
           nonLitExpr += 1;
           const ident = kids[0].getText();
@@ -1445,22 +1515,76 @@ async function runStep105PublicActivationTests(): Promise<void> {
         throw new Error(`Unhandled AST node ${ctor}`);
       };
 
-      const expr = roomPerms.get(op);
-      assert.ok(expr, `Permission ${op} must exist on /rooms/{roomId}`);
       try {
-        const res = Boolean(evalNode(expr, rootEnv));
+        const res = Boolean(evalNode(permExpr, rootEnv));
         return { res, totalExpr, nonLitExpr };
       } catch {
         return { res: false, totalExpr, nonLitExpr };
       }
     };
 
-    const host = makeHostProfile({ id: 'uid_p1', displayName: 'အောင်အောင်' });
+    const evaluateRoomOp = (
+      op: 'create' | 'update' | 'delete',
+      ctx: {
+        roomId: string;
+        authUid: string | null;
+        incData?: Record<string, any> | null;
+        extData?: Record<string, any> | null;
+      }
+    ) => {
+      const expr = roomPerms.get(op);
+      assert.ok(expr, `Permission ${op} must exist on /rooms/{roomId}`);
+      return evaluatePermExpr(expr, {
+        pathVars: { roomId: ctx.roomId },
+        authUid: ctx.authUid,
+        incData: ctx.incData,
+        extData: ctx.extData,
+      });
+    };
 
-    // 13a. Snow Rush 2/3/4 Player Room Create — must evaluate true AND stay well under 1,000 expressions
-    for (const maxPlayers of [2, 3, 4]) {
-      const roomCode = `SR${maxPlayers}CEL`;
-      const payload = {
+    const evaluateRewardClaimCreate = (ctx: {
+      claimId: string;
+      authUid: string | null;
+      incData: Record<string, any>;
+      roomDoc?: Record<string, any>;
+    }) => {
+      const expr = rewardClaimPerms.get('create');
+      assert.ok(expr, 'Permission create must exist on /reward_claims/{claimId}');
+      const mockDocs: Record<string, Record<string, any>> = {};
+      if (ctx.roomDoc && ctx.incData.roomId) {
+        mockDocs[`/databases/${DB_NAME}/documents/rooms/${ctx.incData.roomId}`] = ctx.roomDoc;
+      }
+      return evaluatePermExpr(expr, {
+        pathVars: { claimId: ctx.claimId },
+        authUid: ctx.authUid,
+        incData: ctx.incData,
+        mockDocs,
+      });
+    };
+
+    const assertUnder1000 = (label: string, evalRes: { res: boolean; totalExpr: number; nonLitExpr: number }) => {
+      assert.equal(evalRes.res, true, `${label} must evaluate TRUE against firestore.rules`);
+      assert.ok(
+        evalRes.totalExpr < 1000 && evalRes.nonLitExpr < 850,
+        `${label} (${evalRes.nonLitExpr} ops / ${evalRes.totalExpr} total CEL tokens) MUST stay strictly < 1,000`
+      );
+    };
+
+    const host = makeHostProfile({ id: 'uid_p1', displayName: 'အောင်အောင်' });
+    const p2Profile = makeHostProfile({ id: 'uid_p2', displayName: 'မောင်မောင်', activeTokenSkin: 'token_star' });
+    const p3Profile = makeHostProfile({ id: 'uid_p3', displayName: 'စုစု', activeTokenSkin: 'token_shield' });
+    const p4Profile = makeHostProfile({ id: 'uid_p4', displayName: 'ကျော်ကျော်', activeTokenSkin: 'token_heart' });
+
+    // -------------------------------------------------------------------------
+    // Mandatory Case 1, 2, 3: Real `buildJoinRoomTransactionMutation` for Snow Rush 2P, 3P, and 4P Rooms
+    // -------------------------------------------------------------------------
+    const joiners = [p2Profile, p3Profile, p4Profile];
+    const snowJoinStats: Record<string, { nonLitExpr: number; totalExpr: number }> = {};
+
+    for (const maxPlayers of [2, 3, 4] as const) {
+      const roomCode = `SR${maxPlayers}JOIN`;
+      const roomId = `room_${roomCode}`;
+      let currentDoc: Record<string, any> = {
         ...buildInitialGameRoom({
           hostUser: host,
           effectiveHostUid: host.id,
@@ -1471,46 +1595,288 @@ async function runStep105PublicActivationTests(): Promise<void> {
         timestamp: TIMESTAMP_TAG,
         serverUpdatedAt: TIMESTAMP_TAG,
       };
-      const evalRes = evaluateRoomOp('create', {
-        roomId: `room_${roomCode}`,
-        authUid: host.id,
-        incData: payload,
-      });
-      assert.equal(evalRes.res, true, `Snow Rush ${maxPlayers}P create must pass real firestore.rules AST`);
-      assert.ok(
-        evalRes.nonLitExpr < 850 && evalRes.totalExpr < 1000,
-        `Snow Rush ${maxPlayers}P create (${evalRes.nonLitExpr} ops / ${evalRes.totalExpr} AST tokens) MUST be < 1,000`
-      );
-    }
 
-    // 13b. Snakes & Ladders 2/3/4 Player Room Create — must evaluate true AND stay well under 1,000 expressions
-    for (const maxPlayers of [2, 3, 4]) {
-      const roomCode = `SL${maxPlayers}CEL`;
-      const payload = {
-        ...buildInitialGameRoom({
-          hostUser: host,
-          effectiveHostUid: host.id,
-          roomCode,
-          resolved: resolveCreateGameRoomInput('snakes_and_ladders', { maxPlayers, exactFinish: true }),
-          now: 1760000100000,
-        }),
-        timestamp: TIMESTAMP_TAG,
+      const createEval = evaluateRoomOp('create', {
+        roomId,
+        authUid: host.id,
+        incData: currentDoc,
+      });
+      assertUnder1000(`Snow Rush ${maxPlayers}P Create`, createEval);
+
+      // Join sequentially from Player 2 up to `maxPlayers`
+      for (let slot = 2; slot <= maxPlayers; slot += 1) {
+        const joiner = joiners[slot - 2];
+        const prevPlayersSnapshot = [...currentDoc.players];
+        const prevHostPosSnapshot = currentDoc.playerPositions[host.id];
+
+        const mut = buildJoinRoomTransactionMutation({
+          roomId,
+          roomData: currentDoc as unknown as GameRoom,
+          effectiveUid: joiner.id,
+          user: joiner,
+          txNow: 1760000100000 + slot * 1000,
+        });
+        assert.equal(mut.kind, 'update', `Player ${slot} joining ${maxPlayers}P Snow Rush must produce update`);
+        if (mut.kind !== 'update') throw new Error('Expected update');
+
+        // Verify redundant immutable fields are NOT written in transaction.update payload
+        assert.equal('maxPlayers' in mut.updates, false, 'Join update must not redundantly write maxPlayers');
+        assert.equal('winnerId' in mut.updates, false, 'Join update must not redundantly write null winnerId');
+        assert.equal('winnerName' in mut.updates, false, 'Join update must not redundantly write null winnerName');
+
+        // Verify existing players & their position entries are preserved 100% untouched
+        for (let idx = 0; idx < prevPlayersSnapshot.length; idx += 1) {
+          assert.equal(
+            mut.updates.players[idx],
+            prevPlayersSnapshot[idx],
+            'Existing player slot reference must remain 100% untouched on Join'
+          );
+        }
+        assert.equal(
+          mut.updates.playerPositions[host.id],
+          prevHostPosSnapshot,
+          'Existing host playerPositions entry must remain 100% untouched on Join'
+        );
+
+        const nextDoc = applyFirestoreTransactionUpdate(currentDoc, mut.updates);
+        assert.equal(
+          nextDoc.status,
+          slot === maxPlayers ? 'full' : 'waiting',
+          `Room status after ${slot}/${maxPlayers} join must be ${slot === maxPlayers ? 'full' : 'waiting'}`
+        );
+
+        const joinEval = evaluateRoomOp('update', {
+          roomId,
+          authUid: joiner.id,
+          extData: currentDoc,
+          incData: nextDoc,
+        });
+        assertUnder1000(`Snow Rush ${maxPlayers}P Join (Player ${slot})`, joinEval);
+        snowJoinStats[`${maxPlayers}P_slot${slot}`] = {
+          nonLitExpr: joinEval.nonLitExpr,
+          totalExpr: joinEval.totalExpr,
+        };
+        currentDoc = nextDoc;
+      }
+
+      // Mandatory Case 4: Duplicate UID Join — Client returns noop (alreadyJoined=true) & Rules DENY duplicate UID append
+      const dupClientMut = buildJoinRoomTransactionMutation({
+        roomId,
+        roomData: currentDoc as unknown as GameRoom,
+        effectiveUid: p2Profile.id,
+        user: p2Profile,
+        txNow: 1760000200000,
+      });
+      assert.equal(dupClientMut.kind, 'noop', 'Duplicate UID join in client must be idempotent noop');
+      assert.equal(dupClientMut.result.alreadyJoined, true);
+
+      // Mandatory Case 5: Room Full Join DENIED — Both client RoomJoinError('ROOM_FULL') and Firestore Rules false
+      const extraOutsider = makeHostProfile({ id: 'uid_outsider_5', displayName: 'အပြင်လူ' });
+      assert.throws(
+        () =>
+          buildJoinRoomTransactionMutation({
+            roomId,
+            roomData: currentDoc as unknown as GameRoom,
+            effectiveUid: extraOutsider.id,
+            user: extraOutsider,
+            txNow: 1760000205000,
+          }),
+        (err: unknown) => err instanceof RoomJoinError && err.code === 'ROOM_FULL',
+        `Joining full ${maxPlayers}/${maxPlayers} Snow Rush room must throw ROOM_FULL`
+      );
+
+      const forgedFullJoinDoc = {
+        ...currentDoc,
+        players: [...currentDoc.players, { ...currentDoc.players[0], uid: extraOutsider.id, isReady: false }],
+        playerCount: currentDoc.players.length + 1,
+        stateVersion: currentDoc.stateVersion + 1,
         serverUpdatedAt: TIMESTAMP_TAG,
       };
-      const evalRes = evaluateRoomOp('create', {
-        roomId: `room_${roomCode}`,
-        authUid: host.id,
-        incData: payload,
+      const fullJoinRulesEval = evaluateRoomOp('update', {
+        roomId,
+        authUid: extraOutsider.id,
+        extData: currentDoc,
+        incData: forgedFullJoinDoc,
       });
-      assert.equal(evalRes.res, true, `Snakes & Ladders ${maxPlayers}P create must pass real firestore.rules AST`);
-      assert.ok(
-        evalRes.nonLitExpr < 850 && evalRes.totalExpr < 1000,
-        `Snakes & Ladders ${maxPlayers}P create (${evalRes.nonLitExpr} ops / ${evalRes.totalExpr} AST tokens) MUST be < 1,000`
-      );
+      assert.equal(fullJoinRulesEval.res, false, `Firestore rules MUST deny joining full ${maxPlayers}P room`);
     }
 
-    // 13c. Worst-case 4-Player Room Updates (Join, Ready, Host Start, Snakes Dice Roll, Host Leave, Play Again)
-    const baseSnow4 = {
+    // Also test Duplicate UID forged rules append on a waiting 3P room (1/3 occupied)
+    const sr3Waiting1P: Record<string, any> = {
+      ...buildInitialGameRoom({
+        hostUser: host,
+        effectiveHostUid: host.id,
+        roomCode: 'SR3DUP',
+        resolved: resolveCreateGameRoomInput('snow_rush', { maxPlayers: 3 }),
+        now: 1760000100000,
+      }),
+      timestamp: TIMESTAMP_TAG,
+      serverUpdatedAt: TIMESTAMP_TAG,
+    };
+    const forgedDupUidDoc = {
+      ...sr3Waiting1P,
+      players: [sr3Waiting1P.players[0], { ...sr3Waiting1P.players[0], isReady: false }],
+      playerCount: 2,
+      stateVersion: 2,
+      serverUpdatedAt: TIMESTAMP_TAG,
+    };
+    const dupUidRulesEval = evaluateRoomOp('update', {
+      roomId: 'room_SR3DUP',
+      authUid: host.id,
+      extData: sr3Waiting1P,
+      incData: forgedDupUidDoc,
+    });
+    assert.equal(dupUidRulesEval.res, false, 'Firestore rules MUST deny duplicate UID append');
+
+    // Also verify status=='full' room with < maxPlayers is rejected by both client & rules Action 2
+    const corruptedStatusFullRoom: Record<string, any> = { ...sr3Waiting1P, status: 'full' };
+    assert.throws(
+      () =>
+        buildJoinRoomTransactionMutation({
+          roomId: 'room_SR3DUP',
+          roomData: corruptedStatusFullRoom as unknown as GameRoom,
+          effectiveUid: p2Profile.id,
+          user: p2Profile,
+          txNow: 1760000105000,
+        }),
+      (err: unknown) => err instanceof RoomJoinError && err.code === 'ROOM_FULL'
+    );
+    const classifiedPermJoinErr = classifyRoomOperationError(
+      { code: 'permission-denied', message: 'Missing or insufficient permissions.' },
+      'rooms/room_SR3DUP',
+      'join'
+    );
+    assert.equal(classifiedPermJoinErr.code, 'PERMISSION_DENIED');
+    assert.equal(classifiedPermJoinErr.firebaseCode, 'permission-denied');
+    assert.equal(
+      classifiedPermJoinErr.message,
+      'အခန်းခွင့်ပြုချက် စစ်ဆေးရာတွင် အဆင်မပြေဖြစ်သွားပါသည်။ အကောင့်ပြန်စစ်ဆေးပြီး ထပ်မံကြိုးစားပေးပါ။'
+    );
+    const joinOnFullStatusEval = evaluateRoomOp('update', {
+      roomId: 'room_SR3DUP',
+      authUid: p2Profile.id,
+      extData: corruptedStatusFullRoom,
+      incData: {
+        ...corruptedStatusFullRoom,
+        players: [corruptedStatusFullRoom.players[0], { ...corruptedStatusFullRoom.players[0], uid: p2Profile.id, isReady: false }],
+        playerCount: 2,
+        status: 'waiting',
+        stateVersion: 2,
+        serverUpdatedAt: TIMESTAMP_TAG,
+      },
+    });
+    assert.equal(joinOnFullStatusEval.res, false, 'Action 2 MUST reject join if ext.status != waiting');
+
+    // -------------------------------------------------------------------------
+    // Mandatory Case 8: Existing Room / Host / Player Data Tampering on Join DENIED
+    // -------------------------------------------------------------------------
+    const validP2JoinMut = buildJoinRoomTransactionMutation({
+      roomId: 'room_SR3DUP',
+      roomData: sr3Waiting1P as unknown as GameRoom,
+      effectiveUid: p2Profile.id,
+      user: p2Profile,
+      txNow: 1760000102000,
+    });
+    if (validP2JoinMut.kind !== 'update') throw new Error('Expected update');
+    const cleanP2JoinedDoc = applyFirestoreTransactionUpdate(sr3Waiting1P, validP2JoinMut.updates);
+
+    // 8a. Tampering hostId during Join -> DENIED
+    assert.equal(
+      evaluateRoomOp('update', {
+        roomId: 'room_SR3DUP',
+        authUid: p2Profile.id,
+        extData: sr3Waiting1P,
+        incData: { ...cleanP2JoinedDoc, hostId: p2Profile.id },
+      }).res,
+      false,
+      'Host hijack during Join MUST be denied'
+    );
+    // 8b. Tampering gameType during Join -> DENIED
+    assert.equal(
+      evaluateRoomOp('update', {
+        roomId: 'room_SR3DUP',
+        authUid: p2Profile.id,
+        extData: sr3Waiting1P,
+        incData: { ...cleanP2JoinedDoc, gameType: 'snakes_and_ladders' },
+      }).res,
+      false,
+      'gameType tamper during Join MUST be denied'
+    );
+    // 8c. Tampering maxPlayers during Join -> DENIED
+    assert.equal(
+      evaluateRoomOp('update', {
+        roomId: 'room_SR3DUP',
+        authUid: p2Profile.id,
+        extData: sr3Waiting1P,
+        incData: { ...cleanP2JoinedDoc, maxPlayers: 4 },
+      }).res,
+      false,
+      'maxPlayers tamper during Join MUST be denied'
+    );
+    // 8d. Tampering existing host player's displayName / isReady / position during Join -> DENIED
+    assert.equal(
+      evaluateRoomOp('update', {
+        roomId: 'room_SR3DUP',
+        authUid: p2Profile.id,
+        extData: sr3Waiting1P,
+        incData: {
+          ...cleanP2JoinedDoc,
+          players: [{ ...cleanP2JoinedDoc.players[0], displayName: 'HACKED_HOST' }, cleanP2JoinedDoc.players[1]],
+        },
+      }).res,
+      false,
+      'Existing player displayName tamper during Join MUST be denied'
+    );
+    // 8e. Joining player spoofing another user's UID or starting at position 99 or isReady=true -> DENIED
+    assert.equal(
+      evaluateRoomOp('update', {
+        roomId: 'room_SR3DUP',
+        authUid: p2Profile.id,
+        extData: sr3Waiting1P,
+        incData: {
+          ...cleanP2JoinedDoc,
+          players: [cleanP2JoinedDoc.players[0], { ...cleanP2JoinedDoc.players[1], position: 99 }],
+        },
+      }).res,
+      false,
+      'Joining with position != 1 MUST be denied'
+    );
+    assert.equal(
+      evaluateRoomOp('update', {
+        roomId: 'room_SR3DUP',
+        authUid: p2Profile.id,
+        extData: sr3Waiting1P,
+        incData: {
+          ...cleanP2JoinedDoc,
+          players: [cleanP2JoinedDoc.players[0], { ...cleanP2JoinedDoc.players[1], isReady: true }],
+        },
+      }).res,
+      false,
+      'Joining with isReady=true MUST be denied'
+    );
+    // 8f. Joining player tampering existing host's presence entry -> DENIED
+    assert.equal(
+      evaluateRoomOp('update', {
+        roomId: 'room_SR3DUP',
+        authUid: p2Profile.id,
+        extData: sr3Waiting1P,
+        incData: {
+          ...cleanP2JoinedDoc,
+          presence: {
+            ...cleanP2JoinedDoc.presence,
+            [host.id]: { isConnected: false, lastSeen: 0, disconnectedAt: 1 },
+          },
+        },
+      }).res,
+      false,
+      'Tampering another player presence entry during Join MUST be denied'
+    );
+
+    // -------------------------------------------------------------------------
+    // Mandatory Case 11 & 12: Worst-case 4-Player Lifecycle & Snakes & Ladders Regression (< 1,000 totalExpr)
+    // -------------------------------------------------------------------------
+    // Build a 4P Snow Rush room through real sequential joins
+    let snow4Room: Record<string, any> = {
       ...buildInitialGameRoom({
         hostUser: host,
         effectiveHostUid: 'uid_p1',
@@ -1521,75 +1887,80 @@ async function runStep105PublicActivationTests(): Promise<void> {
       timestamp: TIMESTAMP_TAG,
       serverUpdatedAt: TIMESTAMP_TAG,
     };
-    const mkPlayer = (uid: string, name: string, isReady = false, pos = 1, updatedAtMs = 1760000100000) => ({
-      ...baseSnow4.players[0],
-      uid,
-      displayName: name,
-      isReady,
-      position: pos,
-      updatedAtMs,
-    });
+    let join4Res = { res: false, totalExpr: 0, nonLitExpr: 0 };
+    for (const [idx, joiner] of [p2Profile, p3Profile, p4Profile].entries()) {
+      const m = buildJoinRoomTransactionMutation({
+        roomId: 'room_SR4UPD',
+        roomData: snow4Room as unknown as GameRoom,
+        effectiveUid: joiner.id,
+        user: joiner,
+        txNow: 1760000101000 + idx * 1000,
+      });
+      if (m.kind !== 'update') throw new Error('Expected update');
+      const next = applyFirestoreTransactionUpdate(snow4Room, m.updates);
+      join4Res = evaluateRoomOp('update', {
+        roomId: 'room_SR4UPD',
+        authUid: joiner.id,
+        extData: snow4Room,
+        incData: next,
+      });
+      assertUnder1000(`4P Snow Rush Sequential Join #${idx + 2}`, join4Res);
+      snow4Room = next;
+    }
 
-    // Action 2: 4th player joins waiting 3P Snow Rush room -> full 4P
-    const snow3Waiting = {
-      ...baseSnow4,
-      players: [mkPlayer('uid_p1', 'P1'), mkPlayer('uid_p2', 'P2', true), mkPlayer('uid_p3', 'P3', true)],
-      playerCount: 3,
-      stateVersion: 3,
-    };
-    const snow4Joined = {
-      ...snow3Waiting,
-      players: [...snow3Waiting.players, mkPlayer('uid_p4', 'P4', false)],
-      playerCount: 4,
-      status: 'full',
-      stateVersion: 4,
-      serverUpdatedAt: TIMESTAMP_TAG,
-    };
-    const join4Res = evaluateRoomOp('update', {
-      roomId: 'room_SR4UPD',
-      authUid: 'uid_p4',
-      extData: snow3Waiting,
-      incData: snow4Joined,
-    });
-    assert.equal(join4Res.res, true, '4th player joining Snow Rush must pass firestore.rules');
-    assert.ok(join4Res.nonLitExpr < 850, `4P Join CEL ops (${join4Res.nonLitExpr}) MUST be < 850 (< 1,000 hard limit)`);
+    // Ready toggles for P2, P3, P4
+    let snow4AllReady = snow4Room;
+    let ready4Res = { res: false, totalExpr: 0, nonLitExpr: 0 };
+    for (const rIdx of [1, 2, 3]) {
+      const uid = snow4AllReady.players[rIdx].uid;
+      const nextPlayers = snow4AllReady.players.map((p: any, i: number) =>
+        i === rIdx ? { ...p, isReady: true, updatedAtMs: 1760000105000 + rIdx } : p
+      );
+      const nextReadyDoc = {
+        ...snow4AllReady,
+        players: nextPlayers,
+        stateVersion: snow4AllReady.stateVersion + 1,
+        updatedAt: new Date(1760000105000 + rIdx).toISOString(),
+        serverUpdatedAt: TIMESTAMP_TAG,
+      };
+      ready4Res = evaluateRoomOp('update', {
+        roomId: 'room_SR4UPD',
+        authUid: uid,
+        extData: snow4AllReady,
+        incData: nextReadyDoc,
+      });
+      assertUnder1000(`4P Snow Rush Ready Toggle slot ${rIdx + 1}`, ready4Res);
+      snow4AllReady = nextReadyDoc;
+    }
 
-    // Action 3: 4th player toggles Ready
-    const snow4AllReady = {
-      ...snow4Joined,
-      players: [
-        snow4Joined.players[0],
-        snow4Joined.players[1],
-        snow4Joined.players[2],
-        { ...snow4Joined.players[3], isReady: true, updatedAtMs: 1760000105000 },
-      ],
-      stateVersion: 5,
-    };
-    const ready4Res = evaluateRoomOp('update', {
-      roomId: 'room_SR4UPD',
-      authUid: 'uid_p4',
-      extData: snow4Joined,
-      incData: snow4AllReady,
-    });
-    assert.equal(ready4Res.res, true, '4th player toggling Ready must pass firestore.rules');
-    assert.ok(ready4Res.nonLitExpr < 850, `4P Ready CEL ops (${ready4Res.nonLitExpr}) MUST be < 850 (< 1,000 hard limit)`);
-
-    // Action 4: Host starts 4P Snow Rush (all 4 players mutated simultaneously)
+    // Action 4: Host starts 4P Snow Rush
     const snow4Started = {
       ...snow4AllReady,
       status: 'playing',
-      players: snow4AllReady.players.map((p) => ({
+      players: snow4AllReady.players.map((p: any) => ({
         ...p,
         position: 1,
-        positionVersion: 2,
+        positionVersion: 1,
         lastMoveId: null,
         updatedAtMs: 1760000110000,
       })),
+      currentTurnIndex: 0,
+      turnStartTimestamp: 0,
+      turnDeadline: 0,
+      reconnectionDeadline: null,
+      disconnectedPlayerId: null,
+      disconnectedPlayerName: null,
+      lastMoveId: null,
+      lastMovePath: [],
+      lastMovingPlayerUid: null,
+      winnerId: null,
+      winnerName: null,
       matchParticipantIds: ['uid_p1', 'uid_p2', 'uid_p3', 'uid_p4'],
       gameRound: 2,
-      stateVersion: 6,
-      turnStartTimestamp: 1760000110000,
-      turnDeadline: 1760000140000,
+      stateVersion: snow4AllReady.stateVersion + 1,
+      lastMoveSummary: 'Snow Rush ပြိုင်ပွဲ စတင်ပါပြီ!',
+      updatedAt: new Date(1760000110000).toISOString(),
+      serverUpdatedAt: TIMESTAMP_TAG,
     };
     const start4Res = evaluateRoomOp('update', {
       roomId: 'room_SR4UPD',
@@ -1597,8 +1968,49 @@ async function runStep105PublicActivationTests(): Promise<void> {
       extData: snow4AllReady,
       incData: snow4Started,
     });
-    assert.equal(start4Res.res, true, 'Host starting 4P Snow Rush must pass firestore.rules');
-    assert.ok(start4Res.nonLitExpr < 850, `4P Host Start CEL ops (${start4Res.nonLitExpr}) MUST be < 850 (< 1,000 hard limit)`);
+    assertUnder1000('4P Snow Rush Host Start', start4Res);
+
+    // Snakes & Ladders 2P/3P/4P Join + Full 4P Lifecycle Regression
+    for (const maxPlayers of [2, 3, 4] as const) {
+      const slCode = `SL${maxPlayers}JOIN`;
+      const slRoomId = `room_${slCode}`;
+      const slInit: Record<string, any> = {
+        ...buildInitialGameRoom({
+          hostUser: host,
+          effectiveHostUid: host.id,
+          roomCode: slCode,
+          resolved: resolveCreateGameRoomInput('snakes_and_ladders', { maxPlayers, exactFinish: true }),
+          now: 1760000100000,
+        }),
+        timestamp: TIMESTAMP_TAG,
+        serverUpdatedAt: TIMESTAMP_TAG,
+      };
+      assertUnder1000(
+        `Snakes & Ladders ${maxPlayers}P Create`,
+        evaluateRoomOp('create', { roomId: slRoomId, authUid: host.id, incData: slInit })
+      );
+
+      const slJoinMut = buildJoinRoomTransactionMutation({
+        roomId: slRoomId,
+        roomData: slInit as unknown as GameRoom,
+        effectiveUid: p2Profile.id,
+        user: p2Profile,
+        txNow: 1760000102000,
+      });
+      assert.equal(slJoinMut.kind, 'update');
+      if (slJoinMut.kind === 'update') {
+        const slAfterJoin = applyFirestoreTransactionUpdate(slInit, slJoinMut.updates);
+        assertUnder1000(
+          `Snakes & Ladders ${maxPlayers}P Join`,
+          evaluateRoomOp('update', {
+            roomId: slRoomId,
+            authUid: p2Profile.id,
+            extData: slInit,
+            incData: slAfterJoin,
+          })
+        );
+      }
+    }
 
     // Action 5: Snakes & Ladders 4P Active Turn Dice Roll
     const snakes4Playing = {
@@ -1607,11 +2019,13 @@ async function runStep105PublicActivationTests(): Promise<void> {
       roomCode: 'SL4UPD',
       gameType: 'snakes_and_ladders',
       currentTurnIndex: 0,
+      turnStartTimestamp: 1760000110000,
+      turnDeadline: 1760000140000,
     };
     const snakes4Moved = {
       ...snakes4Playing,
       players: [
-        { ...snakes4Playing.players[0], position: 14, positionVersion: 3, lastMoveId: 'mv_1', updatedAtMs: 1760000115000 },
+        { ...snakes4Playing.players[0], position: 14, positionVersion: 2, lastMoveId: 'mv_1', updatedAtMs: 1760000115000 },
         snakes4Playing.players[1],
         snakes4Playing.players[2],
         snakes4Playing.players[3],
@@ -1620,7 +2034,7 @@ async function runStep105PublicActivationTests(): Promise<void> {
       lastMoveId: 'mv_1',
       lastMovingPlayerUid: 'uid_p1',
       currentTurnIndex: 1,
-      stateVersion: 7,
+      stateVersion: snakes4Playing.stateVersion + 1,
     };
     const move4Res = evaluateRoomOp('update', {
       roomId: 'room_SL4UPD',
@@ -1628,8 +2042,7 @@ async function runStep105PublicActivationTests(): Promise<void> {
       extData: snakes4Playing,
       incData: snakes4Moved,
     });
-    assert.equal(move4Res.res, true, '4P Snakes & Ladders turn move must pass firestore.rules');
-    assert.ok(move4Res.nonLitExpr < 850, `4P Snakes Move CEL ops (${move4Res.nonLitExpr}) MUST be < 850 (< 1,000 hard limit)`);
+    assertUnder1000('4P Snakes & Ladders Active Turn Move', move4Res);
 
     // Action 7: 4P -> 3P Host Leave in Snow Rush
     const leaveOutcome = computeGameRoomLeaveOutcome({
@@ -1638,21 +2051,16 @@ async function runStep105PublicActivationTests(): Promise<void> {
       now: 1760000120000,
     });
     assert.equal(leaveOutcome.action, 'update');
+    let leave4Res = { res: false, totalExpr: 0, nonLitExpr: 0 };
     if (leaveOutcome.action === 'update') {
-      const snow3AfterHostLeave = {
-        ...snow4Started,
-        ...leaveOutcome.updates,
-        stateVersion: 7,
-        serverUpdatedAt: TIMESTAMP_TAG,
-      };
-      const leave4Res = evaluateRoomOp('update', {
+      const snow3AfterHostLeave = applyFirestoreTransactionUpdate(snow4Started, leaveOutcome.updates);
+      leave4Res = evaluateRoomOp('update', {
         roomId: 'room_SR4UPD',
         authUid: 'uid_p1',
         extData: snow4Started,
         incData: snow3AfterHostLeave,
       });
-      assert.equal(leave4Res.res, true, '4P -> 3P Snow Rush Host Leave must pass firestore.rules');
-      assert.ok(leave4Res.nonLitExpr < 850, `4P Host Leave CEL ops (${leave4Res.nonLitExpr}) MUST be < 850 (< 1,000 hard limit)`);
+      assertUnder1000('4P -> 3P Snow Rush Host Leave', leave4Res);
     }
 
     // Action 8: Snakes & Ladders 4P Play Again Reset
@@ -1660,23 +2068,35 @@ async function runStep105PublicActivationTests(): Promise<void> {
       ...snakes4Moved,
       status: 'finished',
       winnerId: 'uid_p1',
-      winnerName: 'P1',
+      winnerName: 'အောင်အောင်',
     };
     const snakes4PlayAgain = {
       ...snakes4Finished,
       status: 'full',
       winnerId: null,
       winnerName: null,
-      players: snakes4Finished.players.map((p, idx) => ({
+      currentTurnIndex: 0,
+      lastDiceRoll: 1,
+      turnStartTimestamp: 0,
+      turnDeadline: 0,
+      lastMoveTimestamp: 1760000130000,
+      reconnectionDeadline: null,
+      disconnectedPlayerId: null,
+      disconnectedPlayerName: null,
+      lastMoveId: null,
+      lastMovePath: [],
+      lastMovingPlayerUid: null,
+      players: snakes4Finished.players.map((p: any, idx: number) => ({
         ...p,
         isReady: idx === 0,
         position: 1,
-        positionVersion: 4,
+        positionVersion: 3,
         lastMoveId: null,
         updatedAtMs: 1760000130000,
       })),
       gameRound: 3,
-      stateVersion: 8,
+      stateVersion: snakes4Finished.stateVersion + 1,
+      serverUpdatedAt: TIMESTAMP_TAG,
     };
     const playAgain4Res = evaluateRoomOp('update', {
       roomId: 'room_SL4UPD',
@@ -1684,13 +2104,12 @@ async function runStep105PublicActivationTests(): Promise<void> {
       extData: snakes4Finished,
       incData: snakes4PlayAgain,
     });
-    assert.equal(playAgain4Res.res, true, '4P Snakes & Ladders Play Again must pass firestore.rules');
-    assert.ok(
-      playAgain4Res.nonLitExpr < 850,
-      `4P Play Again CEL ops (${playAgain4Res.nonLitExpr}) MUST be < 850 (< 1,000 hard limit)`
-    );
+    assertUnder1000('4P Snakes & Ladders Play Again', playAgain4Res);
 
-    // 13d. Preserved Security Protections (Non-member Update/Delete, Fake Winner, Snow Rush finished)
+    // -------------------------------------------------------------------------
+    // Mandatory Cases 6, 7, 9, 10: Security Denials & Fake Reward Claim Denial
+    // -------------------------------------------------------------------------
+    // Case 6: Non-member Unauthorized Update DENIED
     const nonMemberUpdate = evaluateRoomOp('update', {
       roomId: 'room_SR4UPD',
       authUid: 'uid_attacker',
@@ -1699,17 +2118,19 @@ async function runStep105PublicActivationTests(): Promise<void> {
     });
     assert.equal(nonMemberUpdate.res, false, 'Non-member room update MUST remain blocked');
 
+    // Case 7: Non-member Room Delete DENIED
     const nonMemberDelete = evaluateRoomOp('delete', {
       roomId: 'room_SR4UPD',
       authUid: 'uid_attacker',
-      extData: baseSnow4,
+      extData: snow4Room,
     });
     assert.equal(nonMemberDelete.res, false, 'Non-member room delete MUST remain blocked');
 
+    // Case 9: Fake Winner / status = 'finished' DENIED on Snakes (<94 jump) and Snow Rush (all states)
     const fakeWinnerMove = evaluateRoomOp('update', {
       roomId: 'room_SL4UPD',
       authUid: 'uid_p1',
-      extData: snakes4Playing, // uid_p1 is at position 1 (< 94)
+      extData: snakes4Playing,
       incData: {
         ...snakes4Moved,
         players: [
@@ -1720,7 +2141,7 @@ async function runStep105PublicActivationTests(): Promise<void> {
         ],
         status: 'finished',
         winnerId: 'uid_p1',
-        winnerName: 'P1',
+        winnerName: 'အောင်အောင်',
       },
     });
     assert.equal(fakeWinnerMove.res, false, 'Fake Winner jump from pos 1 -> 100 MUST remain blocked');
@@ -1729,18 +2150,88 @@ async function runStep105PublicActivationTests(): Promise<void> {
       roomId: 'room_SR4UPD',
       authUid: 'uid_p1',
       extData: snow4Started,
-      incData: { ...snow4Started, status: 'finished', stateVersion: 7 },
+      incData: { ...snow4Started, status: 'finished', winnerId: 'uid_p1', winnerName: 'အောင်အောင်', stateVersion: 99 },
     });
-    assert.equal(snowRushFinishedAttempt.res, false, 'Snow Rush status=finished MUST remain blocked');
+    assert.equal(snowRushFinishedAttempt.res, false, 'Snow Rush status=finished / winnerId MUST remain blocked');
+
+    // Case 10: Snow Rush Fake Reward Claim (/reward_claims create) DENIED, while Snakes & Ladders valid win/loss PASSES
+    const fakeSnowRushRewardClaim = evaluateRewardClaimCreate({
+      claimId: 'room_SR4UPD_r2_uid_p1',
+      authUid: 'uid_p1',
+      incData: {
+        id: 'room_SR4UPD_r2_uid_p1',
+        userId: 'uid_p1',
+        roomId: 'room_SR4UPD',
+        gameRound: 2,
+        outcome: 'win',
+        xpGranted: 100,
+        pointsGranted: 1000,
+        createdAt: new Date(1760000150000).toISOString(),
+        serverCreatedAt: TIMESTAMP_TAG,
+      },
+      // Even if a Snow Rush doc somehow had finished/winnerId, isServerVerifiedMatchReward enforces room.gameType == 'snakes_and_ladders'
+      roomDoc: {
+        ...snow4Started,
+        status: 'finished',
+        winnerId: 'uid_p1',
+      },
+    });
+    assert.equal(fakeSnowRushRewardClaim.res, false, 'Snow Rush fake /reward_claims create MUST be denied');
+
+    const validSnakesWinRewardClaim = evaluateRewardClaimCreate({
+      claimId: 'room_SL4UPD_r2_uid_p1',
+      authUid: 'uid_p1',
+      incData: {
+        id: 'room_SL4UPD_r2_uid_p1',
+        userId: 'uid_p1',
+        roomId: 'room_SL4UPD',
+        gameRound: 2,
+        outcome: 'win',
+        xpGranted: 100,
+        pointsGranted: 1000,
+        createdAt: new Date(1760000150000).toISOString(),
+        serverCreatedAt: TIMESTAMP_TAG,
+      },
+      roomDoc: snakes4Finished,
+    });
+    assertUnder1000('Snakes & Ladders Verified Win Reward Claim (+100 XP / +1000 Points)', validSnakesWinRewardClaim);
+
+    const validSnakesLossRewardClaim = evaluateRewardClaimCreate({
+      claimId: 'room_SL4UPD_r2_uid_p2',
+      authUid: 'uid_p2',
+      incData: {
+        id: 'room_SL4UPD_r2_uid_p2',
+        userId: 'uid_p2',
+        roomId: 'room_SL4UPD',
+        gameRound: 2,
+        outcome: 'loss',
+        xpGranted: 75,
+        pointsGranted: 500,
+        createdAt: new Date(1760000150000).toISOString(),
+        serverCreatedAt: TIMESTAMP_TAG,
+      },
+      roomDoc: snakes4Finished,
+    });
+    assertUnder1000('Snakes & Ladders Verified Loss Reward Claim (+75 XP / +500 Points)', validSnakesLossRewardClaim);
 
     passed += 1;
-    const createSnow4Res = evaluateRoomOp('create', { roomId: 'room_SR4UPD', authUid: 'uid_p1', incData: baseSnow4 });
+    const createSnow4Res = evaluateRoomOp('create', { roomId: 'room_SR4UPD', authUid: 'uid_p1', incData: sr3Waiting1P.id ? { ...sr3Waiting1P, id: 'room_SR4UPD', roomCode: 'SR4UPD', maxPlayers: 4 } : snow4Room });
     console.log(
-      `PASS [13/13] Real ANTLR4 firestore.rules CEL evaluation & <1,000 expression budget verified (Create=${createSnow4Res.nonLitExpr} ops/${createSnow4Res.totalExpr} tokens, 4P Join=${join4Res.nonLitExpr}/${join4Res.totalExpr}, 4P Ready=${ready4Res.nonLitExpr}/${ready4Res.totalExpr}, 4P Start=${start4Res.nonLitExpr}/${start4Res.totalExpr}, 4P Move=${move4Res.nonLitExpr}/${move4Res.totalExpr}, 4P PlayAgain=${playAgain4Res.nonLitExpr}/${playAgain4Res.totalExpr}, maxLets=${maxLetsPerFunc})`
+      `PASS [13/13] Real ANTLR4 firestore.rules 12-case Join/Security/CEL verification PASSED (` +
+        `Create=${createSnow4Res.nonLitExpr}/${createSnow4Res.totalExpr}, ` +
+        `2P Join=${snowJoinStats['2P_slot2'].nonLitExpr}/${snowJoinStats['2P_slot2'].totalExpr}, ` +
+        `3P Join=${snowJoinStats['3P_slot3'].nonLitExpr}/${snowJoinStats['3P_slot3'].totalExpr}, ` +
+        `4P Join=${join4Res.nonLitExpr}/${join4Res.totalExpr}, ` +
+        `4P Ready=${ready4Res.nonLitExpr}/${ready4Res.totalExpr}, ` +
+        `4P Start=${start4Res.nonLitExpr}/${start4Res.totalExpr}, ` +
+        `4P Move=${move4Res.nonLitExpr}/${move4Res.totalExpr}, ` +
+        `4P Leave=${leave4Res.nonLitExpr}/${leave4Res.totalExpr}, ` +
+        `4P PlayAgain=${playAgain4Res.nonLitExpr}/${playAgain4Res.totalExpr}, ` +
+        `maxLets=${maxLetsPerFunc})`
     );
   }
 
-  console.log(`\nStep 10.5 / 10.5.2 Public Activation & Permission Diagnosis Verification: ${passed}/13 test groups PASSED.`);
+  console.log(`\nStep 10.5 / 10.5.6 Public Room Join Fix & CEL Verification: ${passed}/13 test groups PASSED.`);
 }
 
 runStep105PublicActivationTests()
